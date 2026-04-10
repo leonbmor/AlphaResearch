@@ -1432,15 +1432,18 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             return
         w0 = w0.reindex(tickers) / w0.reindex(tickers).sum()
 
-        # Full price series from rebalance date to today
-        px        = Pxs_df.loc[rebal_dt:, tickers].copy()
-        if len(px) < 2:
+        # Price series starting from the day AFTER rebalance to today
+        all_px    = Pxs_df.loc[rebal_dt:, tickers].copy()
+        if len(all_px) < 2:
             print("  Insufficient price data since rebalance.")
             return
-        px_norm   = px / px.iloc[0]
+        # Use rebalance date close as cost basis, show P&L from next trading day
+        px_base   = all_px.iloc[0]
+        px        = all_px.iloc[1:]   # exclude rebalance date itself
+        px_norm   = px / px_base
         port_val  = (px_norm * w0.values).sum(axis=1) * 100
-        daily_ret = port_val.pct_change().dropna()
-        px_base   = px.iloc[0]
+        daily_ret = port_val.pct_change()
+        daily_ret.iloc[0] = port_val.iloc[0] / 100 - 1  # first day vs rebal close
         days_held = (today_ts - rebal_dt).days
 
         print(f"\n  Rebalance date : {rebal_dt.date()}  ({days_held} calendar days ago)")
@@ -1450,19 +1453,19 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         print("  " + "-" * 80)
 
         for dt in daily_ret.index:
-            day_ret = daily_ret.loc[dt]
-            cum_ret = port_val.loc[dt] / 100 - 1
-            prev_dt = port_val.index[port_val.index.get_loc(dt) - 1]
-            px_prev = px.loc[prev_dt]
-            w_drift = w0 * (px_prev / px_base)
+            day_ret  = daily_ret.loc[dt]
+            cum_ret  = port_val.loc[dt] / 100 - 1
+            loc      = px.index.get_loc(dt)
+            px_prev  = px_base if loc == 0 else px.iloc[loc - 1]
+            w_drift  = w0 * (px_prev / px_base)
             if w_drift.sum() > 0:
                 w_drift = w_drift / w_drift.sum()
-            stk_ret = (px.loc[dt] / px_prev - 1).fillna(0)
-            contrib = (stk_ret * w_drift).sort_values()
-            top_neg = contrib.nsmallest(2)
-            top_pos = contrib.nlargest(2)
-            parts   = ([f"{t}:{v*100:+.1f}%" for t, v in top_neg.items()] +
-                       [f"{t}:{v*100:+.1f}%" for t, v in top_pos.items()])
+            stk_ret  = (px.loc[dt] / px_prev - 1).fillna(0)
+            contrib  = (stk_ret * w_drift).sort_values()
+            top_neg  = contrib.nsmallest(3)
+            top_pos  = contrib.nlargest(3)
+            parts    = ([f"{t}:{v*100:+.1f}%" for t, v in top_neg.items()] +
+                        [f"{t}:{v*100:+.1f}%" for t, v in top_pos.items()])
             print(f"  {str(dt.date()):<12} {port_val.loc[dt]:>7.2f}  "
                   f"{day_ret*100:>+8.2f}%  {cum_ret*100:>+8.2f}%  "
                   + "  ".join(parts))
