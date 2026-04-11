@@ -1049,6 +1049,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     quality_factor_by_date = {}   # baseline
     all_stock_returns      = []   # pool of individual stock returns across all periods
     all_turnover_ratios    = []   # turnover % at each rebalance
+    all_portfolio_returns  = []   # hybrid portfolio return per holding period
 
     # Load quality scores for baseline
     print("  Loading quality scores for baseline...")
@@ -1247,6 +1248,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                                f"best={c_best:+.1f}%  worst={c_worst:+.1f}%  "
                                f"std={c_std:.1f}%")
                 all_stock_returns.extend(contrib_s.tolist())
+                all_portfolio_returns.append(port_ret * 100)
                 period_str = f"  [{dt.date()} → {period_end.date()}]"
             else:
                 contrib_str = ""
@@ -1627,9 +1629,57 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     except Exception as e:
         print(f"  Could not compute hypothetical rebalance: {e}")
 
+    # ── Consolidated portfolio return statistics (per holding period) ────────
+    import matplotlib.pyplot as plt
+    if all_portfolio_returns:
+        port_arr = np.array(all_portfolio_returns)
+        q_labels = ['Q1 (0-20%)', 'Q2 (20-40%)', 'Q3 (40-60%)', 'Q4 (60-80%)', 'Q5 (80-100%)']
+        port_q   = np.percentile(port_arr, [0, 20, 40, 60, 80, 100])
+
+        print("\n  " + "=" * 72)
+        print("  PORTFOLIO RETURN STATISTICS (per holding period)")
+        print("  " + "=" * 72)
+        print(f"\n  Total periods      : {len(port_arr)}")
+        print(f"  Mean               : {port_arr.mean():>+.2f}%")
+        print(f"  Median             : {np.median(port_arr):>+.2f}%")
+        print(f"  Std Dev            : {port_arr.std():>.2f}%")
+        print(f"  Min                : {port_arr.min():>+.2f}%")
+        print(f"  Max                : {port_arr.max():>+.2f}%")
+        pct_pos = (port_arr > 0).mean() * 100
+        print(f"  % positive periods : {pct_pos:.1f}%")
+        print(f"\n  Quintile boundaries:")
+        for i, lbl in enumerate(q_labels):
+            print(f"    {lbl:<18}  {port_q[i]:>+7.2f}%  →  {port_q[i+1]:>+7.2f}%")
+        if all_turnover_ratios:
+            print(f"\n  Avg turnover per rebalance : {np.mean(all_turnover_ratios):.1f}%")
+            print(f"  Median turnover            : {np.median(all_turnover_ratios):.1f}%")
+
+        # Portfolio returns histogram
+        fig_port, ax_port = plt.subplots(figsize=(12, 4))
+        fig_port.patch.set_facecolor('#FAFAF9')
+        ax_port.set_facecolor('#FAFAF9')
+        n_bins_p = min(40, max(10, len(port_arr) // 5))
+        ax_port.hist(port_arr, bins=n_bins_p, color='#1D9E75', alpha=0.75,
+                     edgecolor='white', linewidth=0.4)
+        ax_port.axvline(port_arr.mean(),     color='#378ADD', linewidth=1.5,
+                        linestyle='--', label=f"Mean {port_arr.mean():+.1f}%")
+        ax_port.axvline(np.median(port_arr), color='#D85A30', linewidth=1.5,
+                        linestyle='--', label=f"Median {np.median(port_arr):+.1f}%")
+        ax_port.axvline(0, color='#888780', linewidth=0.8, linestyle=':')
+        ax_port.set_xlabel("Hybrid portfolio return per holding period (%)",
+                           fontsize=10, color='#5F5E5A')
+        ax_port.set_ylabel("Count", fontsize=10, color='#5F5E5A')
+        ax_port.set_title("Distribution of Portfolio Returns per Holding Period",
+                          fontsize=12, fontweight='500', color='#2C2C2A')
+        ax_port.legend(fontsize=9, framealpha=0.85)
+        ax_port.grid(color='#D3D1C7', linewidth=0.5)
+        ax_port.spines['top'].set_visible(False)
+        ax_port.spines['right'].set_visible(False)
+        plt.tight_layout()
+        plt.show()
+
     # ── Consolidated individual stock return statistics ──────────────────────
     if all_stock_returns:
-        import matplotlib.pyplot as plt
         ret_arr = np.array(all_stock_returns) * 100  # in percent
         q_labels = ['Q1 (0-20%)', 'Q2 (20-40%)', 'Q3 (40-60%)', 'Q4 (60-80%)', 'Q5 (80-100%)']
         quintiles = np.percentile(ret_arr, [0, 20, 40, 60, 80, 100])
@@ -1646,10 +1696,6 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         print(f"\n  Quintile boundaries:")
         for i, lbl in enumerate(q_labels):
             print(f"    {lbl:<18}  {quintiles[i]:>+7.2f}%  →  {quintiles[i+1]:>+7.2f}%")
-        if all_turnover_ratios:
-            print(f"\n  Avg turnover per rebalance : {np.mean(all_turnover_ratios):.1f}%")
-            print(f"  Median turnover            : {np.median(all_turnover_ratios):.1f}%")
-
         # Histogram
         fig_hist, ax_hist = plt.subplots(figsize=(12, 5))
         fig_hist.patch.set_facecolor('#FAFAF9')
