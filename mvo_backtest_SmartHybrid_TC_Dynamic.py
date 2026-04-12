@@ -2141,7 +2141,10 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                                    f"best={stk_r_r.max()*100:+.1f}%  "
                                    f"worst={stk_r_r.min()*100:+.1f}%  "
                                    f"std={stk_r_r.std()*100:.1f}%")
-                print(f"\n  -- {dt_r.date()}  [rebal #{ri+1}]  "
+                _ttype_map = {'init': 'INIT', 'regime': 'REGIME SWITCH',
+                              'derisk': 'DE-RISK', 'turnover': 'TURNOVER'}
+                _ttype_lbl = _ttype_map.get(rec.get('trigger_type', 'turnover'), 'TURNOVER')
+                print(f"\n  -- {dt_r.date()}  [rebal #{ri+1}]  [{_ttype_lbl}]  "
                       f"trigger={rec['trigger']}  regime={rec['regime']}  "
                       f"n={len(w_r)}  eff_N={rec['eff_n']:.1f}  "
                       f"held={rec['days_held']}d  TO={rec['to_dyn']*100:.1f}% --")
@@ -2595,7 +2598,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     # -- Dynamic trigger type summary --
     if _dyn_rebal_log:
         from collections import Counter
-        type_counts = Counter(r['trigger_type'] for r in _dyn_rebal_log)
+        type_counts = Counter(r.get('trigger_type', 'turnover') for r in _dyn_rebal_log)
         total_r     = len(_dyn_rebal_log)
         print(f"\n  Dynamic rebalancing trigger summary ({total_r} total):")
         print(f"  {'Trigger':<20}  {'Count':>6}  {'%':>7}  Distribution")
