@@ -2389,9 +2389,11 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         total_periods = sum(_sh_regime_counts.values())
         if total_periods > 0:
             print(f"\n  Smart hybrid regime prevalence ({total_periods} rebalances):")
+            regime_display = {'alpha': 'alpha', 'hybrid': 'hybrid', 'mvo': 'mvo'}
+            regime_bar     = {'alpha': 'a', 'hybrid': 'h', 'mvo': 'M'}
             for regime, count in _sh_regime_counts.items():
-                bar = '#' * int(count / total_periods * 40)
-                print(f"    {regime:<8}  {count:>4}  ({count/total_periods*100:>5.1f}%)  {bar}")
+                bar = regime_bar[regime] * int(count / total_periods * 40)
+                print(f"    {regime_display[regime]:<8}  {count:>4}  ({count/total_periods*100:>5.1f}%)  {bar}")
 
             # Yearly breakdown
             if _sh_regime_by_date:
@@ -2406,7 +2408,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                     yr_hybrid  = sum(1 for r in yr_dates.values() if r == "hybrid")
                     yr_mvo     = sum(1 for r in yr_dates.values() if r == "mvo")
                     # Mini bar: alpha=green block, h=yellow, m=red
-                    bar = ('alpha' * yr_alpha + 'h' * yr_hybrid + 'M' * yr_mvo)
+                    bar = ('a' * yr_alpha + 'h' * yr_hybrid + 'M' * yr_mvo)
                     print(f"  {yr:<6}  {yr_total:>6}  "
                           f"{yr_alpha:>4} ({yr_alpha/yr_total*100:>4.0f}%)  "
                           f"{yr_hybrid:>4} ({yr_hybrid/yr_total*100:>4.0f}%)  "
