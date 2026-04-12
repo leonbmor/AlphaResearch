@@ -2087,20 +2087,24 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                     else:
                         to_dyn = 1.0  # first rebalance
 
-                    # Trigger label
+                    # Trigger label and type
                     if w_dyn_live.empty:
-                        trigger_lbl = 'init'
+                        trigger_lbl  = 'init'
+                        trigger_type = 'init'
                     elif regime_switch:
-                        trigger_lbl = f'regime->{regime}'
+                        trigger_lbl  = f'regime->{regime}'
+                        trigger_type = 'regime'
                     elif derisk:
-                        trigger_lbl = f'derisk(vd={vd_val*100:+.1f}%)'
+                        trigger_lbl  = f'derisk(vd={vd_val*100:+.1f}%)'
+                        trigger_type = 'derisk'
                     else:
-                        trigger_lbl = f'TO={to_val*100:.1f}%,vd={vd_val*100:+.1f}%'
+                        trigger_lbl  = f'TO={to_val*100:.1f}%,vd={vd_val*100:+.1f}%'
+                        trigger_type = 'turnover'
 
                     # Store rebalance info for forward-looking display (second pass)
                     _dyn_rebal_log.append({
-                        'dt': dt, 'trigger': trigger_lbl, 'regime': regime,
-                        'w': w_new.copy(), 'to_dyn': to_dyn,
+                        'dt': dt, 'trigger': trigger_lbl, 'trigger_type': trigger_type,
+                        'regime': regime, 'w': w_new.copy(), 'to_dyn': to_dyn,
                         'days_held': days_held, 'eff_n': 1.0/(w_new**2).sum() if len(w_new)>0 else 0,
                         'diag_dt': (_past_d[-1] if (_past_d := [d for d in sorted(mvo_weights_by_date.keys()) if d <= dt]) else
                                     ([d for d in sorted(mvo_weights_by_date.keys()) if d > dt] or [None])[0]),
@@ -2448,6 +2452,54 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             sec = sectors_s.get(tkr, '')
             print(f"  {tkr:<8}  {rw:>9.2f}%  {cw:>9.2f}%  "
                   f"{cw-rw:>+7.2f}%  {sec}")
+
+
+    # -- Dynamic strategy: live P&L since last rebalance ----------------------
+    if dyn_weights_by_date:
+        print("\n  " + "=" * 72)
+        print("  LIVE DYNAMIC PORTFOLIO -- P&L SINCE LAST REBALANCE")
+        print("  " + "=" * 72)
+        dyn_rebal_only = {dt: w for dt, w in dyn_weights_by_date.items()
+                          if dt in _cost_by_date.get('dynamic', {})}
+        if dyn_weights_by_date:
+            first_dt = sorted(dyn_weights_by_date.keys())[0]
+            dyn_rebal_only[first_dt] = dyn_weights_by_date[first_dt]
+        _live_pnl_hybrid(dyn_rebal_only, Pxs_df)
+
+        # -- Current live dynamic portfolio ------------------------------------
+        print("\n  " + "=" * 72)
+        print("  CURRENT LIVE DYNAMIC PORTFOLIO (as of last rebalance)")
+        print("  " + "=" * 72)
+        past_rebals_dyn = sorted([d for d in dyn_rebal_only if d <= today_ts])
+        if past_rebals_dyn:
+            live_dt_dyn = past_rebals_dyn[-1]
+            w_live_dyn  = dyn_weights_by_date[live_dt_dyn]
+            w_live_dyn  = w_live_dyn[w_live_dyn > 1e-6].sort_values(ascending=False)
+            tickers_dyn = [t for t in w_live_dyn.index if t in Pxs_df.columns]
+            if tickers_dyn and live_dt_dyn < today_ts:
+                px_rebal_dyn = Pxs_df.loc[live_dt_dyn, tickers_dyn]
+                px_today_dyn = Pxs_df.loc[today_ts, tickers_dyn]
+                w_drift_dyn  = w_live_dyn.reindex(tickers_dyn) * (px_today_dyn / px_rebal_dyn)
+                if w_drift_dyn.sum() > 0:
+                    w_drift_dyn = w_drift_dyn / w_drift_dyn.sum()
+            else:
+                w_drift_dyn = w_live_dyn.reindex(tickers_dyn) if tickers_dyn else w_live_dyn
+            last_rebal_rec = next((r for r in reversed(_dyn_rebal_log)
+                                   if r['dt'] == live_dt_dyn), None)
+            if last_rebal_rec:
+                ttype = last_rebal_rec.get('trigger_type', '').upper()
+                trigger_info = f"  trigger={last_rebal_rec['trigger']}  [{ttype}]"
+            else:
+                trigger_info = ""
+            print(f"\n  Rebalance: {live_dt_dyn.date()}  |  As of: {today_ts.date()}"
+                  f"  |  {len(w_live_dyn)} positions{trigger_info}")
+            print(f"  {'Ticker':<8}  {'Rebal Wt%':>10}  {'Curr Wt%':>10}  {'Drift':>8}  Sector")
+            print("  " + "-" * 60)
+            for tkr in w_live_dyn.index:
+                rw  = w_live_dyn.get(tkr, 0.0) * 100
+                cw  = w_drift_dyn.get(tkr, 0.0) * 100 if tkr in tickers_dyn else rw
+                sec = sectors_s.get(tkr, '')
+                print(f"  {tkr:<8}  {rw:>9.2f}%  {cw:>9.2f}%  {cw-rw:>+7.2f}%  {sec}")
 
     # -- Hypothetical smart hybrid rebalance as of today ---------------------
     print("\n  " + "=" * 72)
