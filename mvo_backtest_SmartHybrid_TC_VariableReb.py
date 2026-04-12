@@ -5,9 +5,9 @@
 mvo_backtest.py
 ===============
 Runs three portfolios in parallel and compares performance:
-  1. Baseline      — quality factor only (from primary_factor_backtest.py)
-  2. Pure Alpha    — composite alpha signal, equal-weight + concentration
-  3. MVO           — composite alpha signal, mean-variance optimized weights
+  1. Baseline      -- quality factor only (from primary_factor_backtest.py)
+  2. Pure Alpha    -- composite alpha signal, equal-weight + concentration
+  3. MVO           -- composite alpha signal, mean-variance optimized weights
 
 MVO uses an ensemble of four covariance matrices (Empirical EWMA,
 Ledoit-Wolf, Factor-driven XFX', PCA) with Grinold-Kahn alpha scaling,
@@ -63,7 +63,7 @@ class _SuppressOutput:
             os.dup2(self._devnull.fileno(), self._stdout_fd)
             self._use_fd = True
         except Exception:
-            # Jupyter: no real fd — fall back to replacing sys.stdout
+            # Jupyter: no real fd -- fall back to replacing sys.stdout
             self._orig_stdout = sys.stdout
             sys.stdout = self._devnull
             self._use_fd = False
@@ -112,9 +112,9 @@ def _mb_floor_then_cap(w, min_weight, max_weight, max_iter=20):
     """
     Post-solve weight adjustment:
 
-    Step 1 — Floor:
+    Step 1 -- Floor:
         Raise non-zero weights to min_weight, renormalize.
-    Step 2 — Cap (iterative):
+    Step 2 -- Cap (iterative):
         Reduce weights above max_weight to max_weight,
         redistribute excess proportionally to remaining stocks.
     """
@@ -193,7 +193,7 @@ def _mb_build_cov_matrices(dt, candidates, Pxs_df, sectors_s,
     # Ledoit-Wolf
     Sigma_lw, _, _ = _mvo_ledoit_wolf(ret_df.values)
 
-    # Factor-driven (self-contained — no _mvo_factor_cov dependency)
+    # Factor-driven (self-contained -- no _mvo_factor_cov dependency)
     try:
         F_mat, factor_names_f, sec_cols_f = _mb_build_F(model_version)
         factor_names_f2, sec_cols_f2 = _mb_get_factor_names(model_version)
@@ -368,7 +368,7 @@ def _mb_sector_dummies(universe, sectors_s, sec_cols):
 
 def _mb_build_X(dt, universe, factor_names, sec_cols,
                  Pxs_df, sectors_s, volumeTrd_df, model_version):
-    """Self-contained X matrix builder — no _rd_build_X dependency."""
+    """Self-contained X matrix builder -- no _rd_build_X dependency."""
     pxs_to_dt = Pxs_df.loc[:dt]
     if len(pxs_to_dt) < BETA_WINDOW // 2:
         return None
@@ -594,7 +594,7 @@ def _mb_build_x_snapshots(rebal_dates, Pxs_df, sectors_s,
     factor_names, sec_cols = _mb_get_factor_names(model_version)
 
     # All dates we need: month-ends from backtest start + latest date
-    # Bound to MB_START_DATE — no point building X before backtest begins
+    # Bound to MB_START_DATE -- no point building X before backtest begins
     pxs_idx_bounded = Pxs_df.index[Pxs_df.index >= MB_START_DATE - pd.Timedelta(days=90)]
     x_snap_dates = _mb_month_end_dates(pxs_idx_bounded, rebal_dates[-1])
 
@@ -610,7 +610,7 @@ def _mb_build_x_snapshots(rebal_dates, Pxs_df, sectors_s,
     to_build = [d for d in x_snap_dates if d not in cached]
     print(f"  Dates to build: {len(to_build)}"
           f"  ({to_build[0].date() if to_build else 'none'}"
-          f" → {to_build[-1].date() if to_build else 'none'})")
+          f" -> {to_build[-1].date() if to_build else 'none'})")
 
     X_snapshots = dict(cached)
     n_built = 0
@@ -724,7 +724,7 @@ def load_daily_portfolios(params_hash, model_version='v2'):
 
 
 # ===============================================================================
-# MVO WEIGHT SOLVER — exact replica of mvo_diagnostics logic
+# MVO WEIGHT SOLVER -- exact replica of mvo_diagnostics logic
 # ===============================================================================
 
 def _mb_max_alpha_portfolio(Sigma, alpha, tickers, risk_aversion,
@@ -773,14 +773,14 @@ def _mb_solve_mvo(dt, candidates, composite_scores, Pxs_df, sectors_s,
       5. Final solve: _mb_max_alpha_portfolio on ensemble, eligible universe
     Returns (weights pd.Series, diagnostics dict).
     """
-    # ── Get cached X snapshot ─────────────────────────────────────────────────
+    # -- Get cached X snapshot -------------------------------------------------
     X_df_cached = None
     if X_snapshots is not None and snapshot_dates is not None:
         valid_snaps = [d for d in snapshot_dates if d <= dt]
         if valid_snaps:
             X_df_cached = X_snapshots[valid_snaps[-1]]
 
-    # ── Return history ────────────────────────────────────────────────────────
+    # -- Return history --------------------------------------------------------
     ret_df = (Pxs_df[candidates].pct_change()
               .dropna(how='all')
               .iloc[-MVO_LOOKBACK:]
@@ -790,7 +790,7 @@ def _mb_solve_mvo(dt, candidates, composite_scores, Pxs_df, sectors_s,
         warnings.warn(f"  {dt.date()} SKIP: only {len(valid)} valid candidates")
         return pd.Series(dtype=float), {}
 
-    # ── Build covariance matrices ─────────────────────────────────────────────
+    # -- Build covariance matrices ---------------------------------------------
     try:
         valid, Sigma_emp, Sigma_lw, Sigma_factor, Sigma_pca, Sigma_ens = \
             _mb_build_cov_matrices(dt, valid, Pxs_df, sectors_s,
@@ -800,14 +800,14 @@ def _mb_solve_mvo(dt, candidates, composite_scores, Pxs_df, sectors_s,
         warnings.warn(f"  {dt.date()} COV MATRIX FAILED: {e}")
         return pd.Series(dtype=float), {}
 
-    # ── Alpha signal ──────────────────────────────────────────────────────────
+    # -- Alpha signal ----------------------------------------------------------
     vol_daily = _mvo_ewma_vol(ret_df[valid], MVO_EWMA_HL)
     vol_ann   = vol_daily * np.sqrt(252)
     z_s       = composite_scores.reindex(valid).fillna(0.0)
     z_capped  = z_s.clip(-zscore_cap, zscore_cap)
     alpha     = (ic * vol_daily * z_capped).fillna(0.0)
 
-    # ── Per-matrix MVO (unconstrained, post-solve floor+cap) ──────────────────
+    # -- Per-matrix MVO (unconstrained, post-solve floor+cap) ------------------
     matrices = {
         'E': Sigma_emp,
         'L': Sigma_lw,
@@ -821,7 +821,7 @@ def _mb_solve_mvo(dt, candidates, composite_scores, Pxs_df, sectors_s,
                                        risk_aversion, max_weight, min_weight)
         top_n_by[mname] = w_m.nlargest(top_n).index.tolist()
 
-    # ── Eligibility: count appearances in 4 individual matrices (not ensemble) ─
+    # -- Eligibility: count appearances in 4 individual matrices (not ensemble) -
     count_matrices = ['E', 'L', 'F', 'P']
     selection_count = {t: sum(1 for m in count_matrices
                               if t in top_n_by[m])
@@ -839,7 +839,7 @@ def _mb_solve_mvo(dt, candidates, composite_scores, Pxs_df, sectors_s,
     else:
         eligible = valid  # alpha-only mode
 
-    # ── Final MVO on ensemble cov, eligible universe ──────────────────────────
+    # -- Final MVO on ensemble cov, eligible universe --------------------------
     elig_idx  = [valid.index(t) for t in eligible]
     S_ens_el  = Sigma_ens[np.ix_(elig_idx, elig_idx)]
     alpha_el  = alpha.reindex(eligible).fillna(0.0)
@@ -852,7 +852,7 @@ def _mb_solve_mvo(dt, candidates, composite_scores, Pxs_df, sectors_s,
         w_out = w_out / w_out.sum()
 
 
-    # ── Diagnostics dict for display ──────────────────────────────────────────
+    # -- Diagnostics dict for display ------------------------------------------
     diag = {
         'vol_ann'        : vol_ann,
         'z_s'            : z_s,
@@ -1036,11 +1036,11 @@ def _mb_plot(nav_baseline, nav_alpha, nav_mvo, regime_s, nav_hybrid=None, nav_sm
 # DAILY PORTFOLIO CACHE BUILDER
 # ===============================================================================
 
-# ── Suppress output ───────────────────────────────────────────────────────────
+# -- Suppress output -----------------------------------------------------------
 # _Suppress = _SuppressOutput (already defined above)
 
 
-# ── Parameter hash ────────────────────────────────────────────────────────────
+# -- Parameter hash ------------------------------------------------------------
 def _params_hash(ic, max_weight, min_weight, zscore_cap, pca_var_threshold,
                  universe_mult, risk_aversion, top_n, conc_factor,
                  prefilt_pct, min_cov_matrices, model_version):
@@ -1055,7 +1055,7 @@ def _params_hash(ic, max_weight, min_weight, zscore_cap, pca_var_threshold,
     ).hexdigest()[:12]
 
 
-# ── DB helpers ────────────────────────────────────────────────────────────────
+# -- DB helpers ----------------------------------------------------------------
 def _ensure_tables():
     with ENGINE.begin() as conn:
         conn.execute(text(f"""
@@ -1129,7 +1129,7 @@ def _save_triggers(dt, mv, ph, implied_to, vol_diff, drawdown, live_strategy):
                'dd': float(drawdown), 'ls': live_strategy})
 
 
-# ── Vol helper ────────────────────────────────────────────────────────────────
+# -- Vol helper ----------------------------------------------------------------
 def _portfolio_vol(w, Pxs_df, dt, lookback=VOL_LOOKBACK):
     """Annualized realized vol of portfolio w over last `lookback` trading days."""
     if w is None or w.empty:
@@ -1148,7 +1148,7 @@ def _portfolio_vol(w, Pxs_df, dt, lookback=VOL_LOOKBACK):
     return float(port_r.std() * np.sqrt(252))
 
 
-# ── Main builder ──────────────────────────────────────────────────────────────
+# -- Main builder --------------------------------------------------------------
 def run_daily_cache_build(
     Pxs_df, sectors_s, weights_by_year, regime_s,
     volumeTrd_df=None,
@@ -1226,10 +1226,10 @@ def run_daily_cache_build(
     print(f"  Dates to compute   : {len(to_compute)}")
 
     if not to_compute:
-        print("\n  ✓ Cache fully up to date")
+        print("\n  OK Cache fully up to date")
         return ph
 
-    # ── [1/3] Composite scores ────────────────────────────────────────────────
+    # -- [1/3] Composite scores ------------------------------------------------
     print("\n  [1/3] Building composite scores...")
     dates_idx = pd.DatetimeIndex(to_compute)
     with _SuppressOutput():
@@ -1246,7 +1246,7 @@ def run_daily_cache_build(
         )
     print(f"  Composite scores: {len(composite_by_date)} dates")
 
-    # ── [2/3] X snapshots ────────────────────────────────────────────────────
+    # -- [2/3] X snapshots ----------------------------------------------------
     print("  [2/3] Loading X snapshots from cache...")
     with _SuppressOutput():
         X_snapshots, _, _, _ = _mb_build_x_snapshots(
@@ -1256,9 +1256,9 @@ def run_daily_cache_build(
     snapshot_dates = sorted(X_snapshots.keys())
     print(f"  X snapshots: {len(snapshot_dates)}")
 
-    # ── [3/3] Per-day computation ─────────────────────────────────────────────
+    # -- [3/3] Per-day computation ---------------------------------------------
     print(f"\n  [3/3] Computing daily portfolios...")
-    print(f"  {'Date':<14} {'TO':>6} {'ΔVol':>7} {'DD':>7}  "
+    print(f"  {'Date':<14} {'TO':>6} {'DVol':>7} {'DD':>7}  "
           f"{'Regime':<8}  {'Elapsed':>7}  {'ETA':>7}")
     print(f"  {'-'*62}")
 
@@ -1290,7 +1290,7 @@ def run_daily_cache_build(
         if not valid_snap:
             continue
 
-        # ── Alpha ─────────────────────────────────────────────────────────────
+        # -- Alpha -------------------------------------------------------------
         ranked     = cands.sort_values(ascending=False)
         alpha_port = [t for t in ranked.head(top_n).index if t in pxs_cols]
         n_p        = len(alpha_port)
@@ -1306,7 +1306,7 @@ def run_daily_cache_build(
                 for j, t in enumerate(alpha_port)
             })
 
-        # ── MVO ───────────────────────────────────────────────────────────────
+        # -- MVO ---------------------------------------------------------------
         try:
             with _SuppressOutput():
                 w_mvo, _ = _mb_solve_mvo(
@@ -1328,7 +1328,7 @@ def run_daily_cache_build(
             continue
         w_mvo_nz = w_mvo[w_mvo > 1e-6]
 
-        # ── Hybrid ────────────────────────────────────────────────────────────
+        # -- Hybrid ------------------------------------------------------------
         all_t    = list(set(w_alpha.index) | set(w_mvo_nz.index))
         w_hybrid = (w_alpha.reindex(all_t).fillna(0.0) +
                     w_mvo_nz.reindex(all_t).fillna(0.0)) / 2.0
@@ -1336,7 +1336,7 @@ def run_daily_cache_build(
         if w_hybrid.sum() > 0:
             w_hybrid = w_hybrid / w_hybrid.sum()
 
-        # ── Smart hybrid regime ───────────────────────────────────────────────
+        # -- Smart hybrid regime -----------------------------------------------
         if not w_hyb_prev.empty and idx > 0:
             prev_dt = to_compute[idx - 1]
             tks_sh  = [t for t in w_hyb_prev.index if t in pxs_cols]
@@ -1361,7 +1361,7 @@ def run_daily_cache_build(
 
         w_hyb_prev = w_hybrid.copy()
 
-        # ── Trigger variables ─────────────────────────────────────────────────
+        # -- Trigger variables -------------------------------------------------
         # Implied turnover vs live portfolio
         if w_live.empty:
             implied_to = 1.0
@@ -1376,10 +1376,10 @@ def run_daily_cache_build(
         vol_diff = vol_new - vol_live
 
         # Update live to today's smart hybrid
-        # (this simulates daily rebalancing — in reality will be trigger-based)
+        # (this simulates daily rebalancing -- in reality will be trigger-based)
         w_live = w_smart.copy()
 
-        # ── Save ──────────────────────────────────────────────────────────────
+        # -- Save --------------------------------------------------------------
         try:
             _save_portfolios(dt, model_version, ph, {
                 'alpha' : w_alpha,
@@ -1406,7 +1406,7 @@ def run_daily_cache_build(
                   f"{elapsed:>5.0f}s  {remaining:>5.0f}s")
 
     elapsed_total = time.time() - t_start
-    print(f"\n  ✓ Done: {n_saved} dates saved, {n_errors} errors  "
+    print(f"\n  OK Done: {n_saved} dates saved, {n_errors} errors  "
           f"({elapsed_total/60:.1f} min)")
     print(f"  params_hash = '{ph}'")
     print(f"\n  Load trigger data with:")
@@ -1437,22 +1437,22 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     Parameters
     ----------
     Pxs_df, sectors_s, weights_by_year, regime_s, volumeTrd_df
-        — same as composite_backtest.py
+        -- same as composite_backtest.py
 
     MVO parameters (function inputs, not user prompts):
-    ic                 : float — Grinold-Kahn IC scaling (default 0.04)
-    max_weight         : float — single-name cap (default 0.10)
-    min_weight         : float — single-name floor (default 0.025)
-    zscore_cap         : float — alpha z-score winsorization (default 2.5)
-    pca_var_threshold  : float — PCA variance explained threshold (default 0.65)
-    universe_mult      : int   — candidate pool = port_n × universe_mult (default 5)
-    risk_aversion      : float — MVO risk aversion λ (default 1.0)
-    force_rebuild_cache: bool  — False (default): load X cache from DB, only
+    ic                 : float -- Grinold-Kahn IC scaling (default 0.04)
+    max_weight         : float -- single-name cap (default 0.10)
+    min_weight         : float -- single-name floor (default 0.025)
+    zscore_cap         : float -- alpha z-score winsorization (default 2.5)
+    pca_var_threshold  : float -- PCA variance explained threshold (default 0.65)
+    universe_mult      : int   -- candidate pool = port_n x universe_mult (default 5)
+    risk_aversion      : float -- MVO risk aversion lambda (default 1.0)
+    force_rebuild_cache: bool  -- False (default): load X cache from DB, only
                                  compute missing dates (typically just today).
                                  True: clear cache and rebuild all dates from scratch.
     """
     print("=" * 72)
-    print("  MVO BACKTEST — Baseline vs Pure Alpha vs MVO")
+    print("  MVO BACKTEST -- Baseline vs Pure Alpha vs MVO")
     print("=" * 72)
     print(f"\n  MVO params: IC={ic}, max_w={max_weight}, min_w={min_weight}, "
           f"zscore_cap={zscore_cap}")
@@ -1463,7 +1463,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     Pxs_df    = Pxs_df.loc[:, ~Pxs_df.columns.duplicated(keep='first')]
     sectors_s = sectors_s[~sectors_s.index.duplicated(keep='first')]
 
-    # ── User prompts (identical to composite_backtest.py) ─────────────────────
+    # -- User prompts (identical to composite_backtest.py) ---------------------
     print("  PORTFOLIO CONSTRUCTION OPTIONS:")
     topn_input    = input(f"  Number of stocks [default={MB_TOP_N}]: ").strip()
     rebal_input   = input(f"  Rebalancing frequency in days [default={MB_REBAL_FREQ}]: ").strip()
@@ -1497,10 +1497,10 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
           f"sector_cap={sector_cap}, mktcap_floor={mktcap_input or 'none'}, "
           f"vol_filter={use_vol}, prefilt={prefilt_pct:.0%}, "
           f"conc={conc_factor:.1f}x (pure alpha only)")
-    print(f"  MVO candidate pool: {n_cands} stocks ({universe_mult}×{top_n})  |  "
+    print(f"  MVO candidate pool: {n_cands} stocks ({universe_mult}x{top_n})  |  "
           f"min_cov_matrices={min_cov_matrices}\n")
 
-    # ── Daily portfolio cache setup ───────────────────────────────────────────
+    # -- Daily portfolio cache setup -------------------------------------------
     params_hash = _make_params_hash(
         ic, max_weight, min_weight, zscore_cap, pca_var_threshold,
         universe_mult, risk_aversion, top_n, conc_factor,
@@ -1521,7 +1521,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         cached_port_dates = _get_cached_portfolio_dates(params_hash, MB_MODEL_VER)
         print(f"  Portfolio cache: {len(cached_port_dates)} dates already cached\n")
 
-    # ── Universe and calc dates ───────────────────────────────────────────────
+    # -- Universe and calc dates -----------------------------------------------
     all_dates      = Pxs_df.index
     st_dt_loc      = all_dates.searchsorted(MB_START_DATE)
     ext_loc        = max(0, st_dt_loc - MOM_LONG_BUFFER)
@@ -1534,7 +1534,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     print(f"  Universe: {len(universe)} stocks  |  "
           f"Rebalance dates: {len(calc_dates)}")
 
-    # ── [1/4] Composite alpha scores ─────────────────────────────────────────
+    # -- [1/4] Composite alpha scores -----------------------------------------
     print("\n[1/4] Building composite alpha scores...")
     composite_by_date, _ = _cb_build_composite_scores(
         universe        = universe,
@@ -1548,7 +1548,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         exclude_factors = ['OU'],
     )
 
-    # ── [2/4] X snapshots (cached) ────────────────────────────────────────────
+    # -- [2/4] X snapshots (cached) --------------------------------------------
     print("\n[2/4] Building X snapshots (monthly, cached)...")
     X_snapshots, _, _, _ = _mb_build_x_snapshots(
         calc_dates, Pxs_df, sectors_s,
@@ -1557,9 +1557,9 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     snapshot_dates = sorted(X_snapshots.keys())
     if snapshot_dates:
         print(f"  X snapshots available: {len(snapshot_dates)}  "
-              f"({snapshot_dates[0].date()} → {snapshot_dates[-1].date()})")
+              f"({snapshot_dates[0].date()} -> {snapshot_dates[-1].date()})")
 
-    # ── [3/4] Compute portfolio weights per rebalance date ────────────────────
+    # -- [3/4] Compute portfolio weights per rebalance date --------------------
     print("\n[3/4] Computing portfolio weights...")
 
     alpha_weights_by_date  = {}   # pure alpha (equal/concentration)
@@ -1601,7 +1601,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     for i, dt in enumerate(calc_dates):
         print(f"  Processing [{i+1}/{n}] {dt.date()}...", end='\r')
 
-        # ── Baseline quality factor ───────────────────────────────────────────
+        # -- Baseline quality factor -------------------------------------------
         if dt in quality_wide.index:
             scores = quality_wide.loc[dt].dropna()
             if not scores.empty:
@@ -1617,7 +1617,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
 
         comp_scores = composite_by_date[dt]
 
-        # ── Candidate universe ────────────────────────────────────────────────
+        # -- Candidate universe ------------------------------------------------
         cands = comp_scores.dropna()
         cands = cands.loc[[t for t in cands.index if t in pxs_cols]]
 
@@ -1646,7 +1646,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
 
         candidates = cands.index.tolist()
 
-        # ── Pure alpha weights (concentration) ────────────────────────────────
+        # -- Pure alpha weights (concentration) --------------------------------
         ranked  = cands.sort_values(ascending=False)
         if sector_cap is not None:
             top_sel = select_with_sector_cap(
@@ -1682,7 +1682,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         _cost_by_date["alpha"][dt] = to_a * TRADING_COST_BPS / 10000
         _prev_w["alpha"] = w_new_a
 
-        # ── MVO weights ───────────────────────────────────────────────────────
+        # -- MVO weights -------------------------------------------------------
         # Use top n_cands candidates for MVO universe
         mvo_cands = candidates[:n_cands]
         valid_snap = [d for d in snapshot_dates if d <= dt]
@@ -1703,7 +1703,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 if 'alpha' in port_cache and 'mvo' in port_cache:
                     alpha_weights_by_date[dt] = port_cache['alpha']
                     mvo_weights_by_date[dt]   = port_cache['mvo']
-                    # hybrid built in display block — skip display for cached dates
+                    # hybrid built in display block -- skip display for cached dates
                     w_hyb_cached = port_cache.get('hybrid', pd.Series(dtype=float))
                     hybrid_weights_by_date[dt] = w_hyb_cached
                     continue
@@ -1759,7 +1759,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             alpha_ann = mvo_diag.get('alpha_ann', pd.Series(dtype=float))
             top_n_by  = mvo_diag.get('top_n_by', {})  # keys: E, L, F, P
 
-            # ── Build hybrid weights for display ──────────────────────────────
+            # -- Build hybrid weights for display ------------------------------
             alpha_w_dt = alpha_weights_by_date.get(dt, pd.Series(dtype=float))
             if not alpha_w_dt.empty:
                 all_t  = list(set(alpha_w_dt.index) | set(w_mvo_nz.index))
@@ -1803,10 +1803,10 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             _cost_by_date["hybrid"][dt] = to_h * TRADING_COST_BPS / 10000
             _prev_w["hybrid"] = w_hyb
 
-            # Compute prev dates once — used by both regime detection and turnover
+            # Compute prev dates once -- used by both regime detection and turnover
             prev_hyb_dates = sorted([d for d in hybrid_weights_by_date if d < dt])
 
-            # ── Determine smart hybrid regime for this date ───────────────────
+            # -- Determine smart hybrid regime for this date -------------------
             # Update running NAV using the hybrid portfolio from prev period
             if prev_hyb_dates:
                 prev_dt   = prev_hyb_dates[-1]
@@ -1823,7 +1823,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
 
             if dd_disp >= -SH_DD_ALPHA:
                 w_disp   = alpha_weights_by_date.get(dt, w_hyb)
-                regime_lbl = f"α (dd={dd_disp*100:+.1f}%)"
+                regime_lbl = f"alpha (dd={dd_disp*100:+.1f}%)"
                 _sh_regime_counts["alpha"] += 1
                 _sh_regime_by_date[dt] = "alpha"
             elif dd_disp >= -SH_DD_HYBRID:
@@ -1842,11 +1842,11 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             w_disp = w_disp[w_disp > 1e-6]
             w_disp = w_disp / w_disp.sum()
 
-            # ── Per-date display: smart hybrid portfolio ──────────────────────
+            # -- Per-date display: smart hybrid portfolio ----------------------
             eff_n  = 1.0 / (w_disp**2).sum() if len(w_disp) > 0 else 0
             n_disp = len(w_disp)
 
-            # ── Turnover vs previous smart hybrid portfolio ───────────────────
+            # -- Turnover vs previous smart hybrid portfolio -------------------
             if prev_hyb_dates:
                 w_prev   = hybrid_weights_by_date[prev_hyb_dates[-1]]
                 all_t_to = list(set(w_disp.index) | set(w_prev.index))
@@ -1857,7 +1857,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             else:
                 turn_str = ""
 
-            # ── Individual stock contributions for this rebal period ──────────
+            # -- Individual stock contributions for this rebal period ----------
             next_rebal_dates = [d for d in calc_dates if d > dt]
             period_end = next_rebal_dates[0] if next_rebal_dates else Pxs_df.index[-1]
             contrib_s  = pd.Series(dtype=float)
@@ -1878,7 +1878,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                                f"std={c_std:.1f}%")
                 all_stock_returns.extend(contrib_s.tolist())
                 all_portfolio_returns.append(port_ret * 100)
-                period_str = f"  [{dt.date()} → {period_end.date()}]"
+                period_str = f"  [{dt.date()} -> {period_end.date()}]"
             else:
                 contrib_str = ""
                 period_str  = ""
@@ -1887,10 +1887,10 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             mvo_tickers_set   = set(w_mvo_nz.index)
             alpha_tickers_set = set(alpha_w_dt.index) if not alpha_w_dt.empty else set()
 
-            print(f"\n  ── {dt.date()}  [{i+1}/{n}]  regime={regime_lbl}  "
+            print(f"\n  -- {dt.date()}  [{i+1}/{n}]  regime={regime_lbl}  "
                   f"n={n_disp}  eff_N={eff_n:.1f}  "
                   f"min={w_disp.min():.1%}  max={w_disp.max():.1%}"
-                  f"{turn_str} ──")
+                  f"{turn_str} --")
             if contrib_str:
                 print(f"  period{period_str}{contrib_str}")
             print(f"  {'Ticker':<8}  {'Weight%':>7}  {'AnnAlpha%':>10}  "
@@ -1921,7 +1921,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
           f"hybrid={len(hybrid_weights_by_date)}, "
           f"baseline={len(quality_factor_by_date)}")
 
-    # ── [4/4] NAV series ──────────────────────────────────────────────────────
+    # -- [4/4] NAV series ------------------------------------------------------
     print("\n[4/4] Computing NAV series...")
 
     nav_alpha    = _mb_run_nav(alpha_weights_by_date,  calc_dates, Pxs_df,
@@ -1931,7 +1931,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     nav_hybrid   = _mb_run_nav(hybrid_weights_by_date, calc_dates, Pxs_df,
                               cost_by_date=_cost_by_date["hybrid"])
 
-    # ── Smart hybrid: switch regime based on running drawdown of hybrid NAV ──
+    # -- Smart hybrid: switch regime based on running drawdown of hybrid NAV --
     smart_hybrid_weights_by_date = {}
     nav_h_hwm = 1.0
     for rdt in sorted(hybrid_weights_by_date.keys()):
@@ -1961,7 +1961,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     nav_smart = _mb_run_nav(smart_hybrid_weights_by_date, calc_dates, Pxs_df,
                              cost_by_date=_cost_by_date["smart"])
 
-    # Baseline trading costs — equal weight assumed, turnover from port changes
+    # Baseline trading costs -- equal weight assumed, turnover from port changes
     _prev_bl = pd.Series(dtype=float)
     for rdt in sorted(quality_factor_by_date.keys()):
         fdf    = quality_factor_by_date[rdt]
@@ -2014,7 +2014,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         columns=[f'Stock{i+1}' for i in range(max_hybrid_n)]
     ) if hybrid_weights_by_date else pd.DataFrame()
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+    # -- Summary ---------------------------------------------------------------
     print(f"\n  {'='*72}")
     print(f"  COMPARISON")
     print(f"  {'='*72}")
@@ -2027,7 +2027,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         (nav_alpha,    f'Pure Alpha (conc={conc_factor:.1f}x)'),
         (nav_mvo,      f'MVO (IC={ic}, max={max_weight:.0%})'),
         (nav_hybrid,   'Hybrid (Alpha+MVO avg)'),
-        (nav_smart,    f'Smart Hybrid (<{SH_DD_ALPHA:.0%}=α,<{SH_DD_HYBRID:.0%}=hyb,else MVO)'),
+        (nav_smart,    f'Smart Hybrid (<{SH_DD_ALPHA:.0%}=alpha,<{SH_DD_HYBRID:.0%}=hyb,else MVO)'),
     ]:
         n_yrs  = (nav_s.index[-1] - nav_s.index[0]).days / 365.25
         cagr   = (nav_s.iloc[-1] / nav_s.iloc[0]) ** (1/n_yrs) - 1
@@ -2053,7 +2053,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
               f"{yr_ret(nav_hybrid):>+9.2f}%  "
               f"{yr_ret(nav_smart):>+9.2f}%")
 
-    # ── Today snapshot ────────────────────────────────────────────────────────
+    # -- Today snapshot --------------------------------------------------------
     today = Pxs_df.index[-1]
     print(f"\n  Computing today's snapshot ({today.date()})...")
 
@@ -2122,7 +2122,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     print(f"  port_hybrid   : {len(port_hybrid)} dates x {len(port_hybrid.columns) if not port_hybrid.empty else 0} stocks (last = today)")
 
 
-    # ── Live hybrid portfolio P&L since last rebalance ───────────────────────
+    # -- Live hybrid portfolio P&L since last rebalance -----------------------
     print("\n  " + "=" * 72)
     print("  LIVE SMART HYBRID PORTFOLIO -- P&L SINCE LAST REBALANCE")
     print("  " + "=" * 72)
@@ -2185,7 +2185,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
 
     _live_pnl_hybrid(smart_hybrid_weights_by_date, Pxs_df)
 
-    # ── Current live portfolio (most recent rebalance, held today) ────────────
+    # -- Current live portfolio (most recent rebalance, held today) ------------
     print("\n  " + "=" * 72)
     print("  CURRENT LIVE SMART HYBRID PORTFOLIO (as of last rebalance)")
     print("  " + "=" * 72)
@@ -2216,7 +2216,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             print(f"  {tkr:<8}  {rw:>9.2f}%  {cw:>9.2f}%  "
                   f"{cw-rw:>+7.2f}%  {sec}")
 
-    # ── Hypothetical smart hybrid rebalance as of today ─────────────────────
+    # -- Hypothetical smart hybrid rebalance as of today ---------------------
     print("\n  " + "=" * 72)
     print(f"  HYPOTHETICAL SMART HYBRID REBALANCE AS OF {today_ts.date()}")
     print("  " + "=" * 72)
@@ -2279,7 +2279,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                     dd_today = _sh_nav_running / _sh_hwm - 1
                     if dd_today >= -SH_DD_ALPHA:
                         w_smart_t  = w_alpha_t
-                        regime_t   = f"α (dd={dd_today*100:+.1f}%)"
+                        regime_t   = f"alpha (dd={dd_today*100:+.1f}%)"
                     elif dd_today >= -SH_DD_HYBRID:
                         w_smart_t  = w_hyp_t
                         regime_t   = f"hybrid (dd={dd_today*100:+.1f}%)"
@@ -2321,7 +2321,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     except Exception as e:
         print(f"  Could not compute hypothetical smart hybrid rebalance: {e}")
 
-    # ── Trading cost summary ─────────────────────────────────────────────────
+    # -- Trading cost summary -------------------------------------------------
     print("\n  " + "=" * 72)
     print(f"  TRADING COSTS SUMMARY  (@ {TRADING_COST_BPS}bps per side)")
     print("  " + "=" * 72)
@@ -2361,7 +2361,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         print(f"  {tot/n_yrs_cost*100:>12.2f}%", end="")
     print()
 
-    # ── Consolidated portfolio return statistics (per holding period) ────────
+    # -- Consolidated portfolio return statistics (per holding period) --------
     import matplotlib.pyplot as plt
     if all_portfolio_returns:
         port_arr = np.array(all_portfolio_returns)
@@ -2381,7 +2381,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         print(f"  % positive periods : {pct_pos:.1f}%")
         print(f"\n  Quintile boundaries:")
         for i, lbl in enumerate(q_labels):
-            print(f"    {lbl:<18}  {port_q[i]:>+7.2f}%  →  {port_q[i+1]:>+7.2f}%")
+            print(f"    {lbl:<18}  {port_q[i]:>+7.2f}%  ->  {port_q[i+1]:>+7.2f}%")
         if all_turnover_ratios:
             print(f"\n  Avg turnover per rebalance : {np.mean(all_turnover_ratios):.1f}%")
             print(f"  Median turnover            : {np.median(all_turnover_ratios):.1f}%")
@@ -2390,7 +2390,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         if total_periods > 0:
             print(f"\n  Smart hybrid regime prevalence ({total_periods} rebalances):")
             for regime, count in _sh_regime_counts.items():
-                bar = '█' * int(count / total_periods * 40)
+                bar = '#' * int(count / total_periods * 40)
                 print(f"    {regime:<8}  {count:>4}  ({count/total_periods*100:>5.1f}%)  {bar}")
 
             # Yearly breakdown
@@ -2405,8 +2405,8 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                     yr_alpha   = sum(1 for r in yr_dates.values() if r == "alpha")
                     yr_hybrid  = sum(1 for r in yr_dates.values() if r == "hybrid")
                     yr_mvo     = sum(1 for r in yr_dates.values() if r == "mvo")
-                    # Mini bar: α=green block, h=yellow, m=red
-                    bar = ('α' * yr_alpha + 'h' * yr_hybrid + 'M' * yr_mvo)
+                    # Mini bar: alpha=green block, h=yellow, m=red
+                    bar = ('alpha' * yr_alpha + 'h' * yr_hybrid + 'M' * yr_mvo)
                     print(f"  {yr:<6}  {yr_total:>6}  "
                           f"{yr_alpha:>4} ({yr_alpha/yr_total*100:>4.0f}%)  "
                           f"{yr_hybrid:>4} ({yr_hybrid/yr_total*100:>4.0f}%)  "
@@ -2436,7 +2436,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         plt.tight_layout()
         plt.show()
 
-    # ── Consolidated individual stock return statistics ──────────────────────
+    # -- Consolidated individual stock return statistics ----------------------
     if all_stock_returns:
         ret_arr = np.array(all_stock_returns) * 100  # in percent
         q_labels = ['Q1 (0-20%)', 'Q2 (20-40%)', 'Q3 (40-60%)', 'Q4 (60-80%)', 'Q5 (80-100%)']
@@ -2453,7 +2453,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         print(f"  Max                : {ret_arr.max():>+.2f}%")
         print(f"\n  Quintile boundaries:")
         for i, lbl in enumerate(q_labels):
-            print(f"    {lbl:<18}  {quintiles[i]:>+7.2f}%  →  {quintiles[i+1]:>+7.2f}%")
+            print(f"    {lbl:<18}  {quintiles[i]:>+7.2f}%  ->  {quintiles[i+1]:>+7.2f}%")
         # Histogram
         fig_hist, ax_hist = plt.subplots(figsize=(12, 5))
         fig_hist.patch.set_facecolor('#FAFAF9')
@@ -2501,7 +2501,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         'weights_by_year'        : weights_by_year,
     }
 
-    # ── Load daily trigger variables from cache if available ──────────────────
+    # -- Load daily trigger variables from cache if available ------------------
     try:
         triggers_df = pd.read_sql(
             f"""SELECT date, implied_turnover, vol_diff, drawdown, live_strategy
@@ -2517,7 +2517,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             print(f"  (implied_turnover, vol_diff, drawdown, live_strategy)")
             results['daily_triggers'] = triggers_df
         else:
-            print("\n  No daily trigger data found — run run_daily_cache_build() first")
+            print("\n  No daily trigger data found -- run run_daily_cache_build() first")
             results['daily_triggers'] = pd.DataFrame()
     except Exception as e:
         warnings.warn(f"  Could not load trigger data: {e}")
