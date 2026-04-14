@@ -2445,6 +2445,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             n_disp = len(w_disp)
 
             # -- Turnover vs previous smart hybrid portfolio -------------------
+            prev_hyb_dates = sorted([d for d in hybrid_weights_by_date if d < dt])
             if prev_hyb_dates:
                 w_prev   = hybrid_weights_by_date[prev_hyb_dates[-1]]
                 all_t_to = list(set(w_disp.index) | set(w_prev.index))
