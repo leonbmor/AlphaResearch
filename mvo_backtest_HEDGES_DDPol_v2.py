@@ -2869,9 +2869,11 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             prev_nav = dd_nav.iloc[i-1]
             prev_dt  = nav_dyn_hedged.index[i-1]
 
-            # Update theoretical MVO NAV (always fully loaded)
-            mvo_r    = mvo_ret_s.get(dt, 0)
-            theo_nav = theo_nav * (1 + mvo_r)
+            # Update theoretical MVO NAV — only track when DD policy is active
+            # (resets at each de-gross event, irrelevant when fully invested)
+            if dd_active:
+                mvo_r    = mvo_ret_s.get(dt, 0)
+                theo_nav = theo_nav * (1 + mvo_r)
 
             # Actual return for this day scaled by current exposure
             raw_r = base_ret.get(dt, 0)
@@ -2983,9 +2985,9 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         nav_dd.name = 'nav_dd'
 
         # Summary
-        flat_events    = [e for e in _dd_log if 'FLAT' in e['event']]
-        reentry_events = [e for e in _dd_log if 'RE-ENTRY' in e['event']]
-        print(f"\n  DD Policy summary: {len(flat_events)} de-gross events, "
+        degross_events  = [e for e in _dd_log if 'EXPOSURE' in e['event'] or 'FLAT' in e['event']]
+        reentry_events  = [e for e in _dd_log if 'RE-ENTRY' in e['event']]
+        print(f"\n  DD Policy summary: {len(degross_events)} de-gross events, "
               f"{len(reentry_events)} re-entry steps")
         if not _dd_log:
             print(f"  DD Policy: no events triggered over backtest period")
