@@ -1440,10 +1440,12 @@ def run_hedge_backtest(Pxs_df:            pd.DataFrame,
             total_pnl = 0.0
             for inst, h in active_hedges.items():
                 if dt in Pxs_df.index and h['entry_px'] and not np.isnan(h['entry_px']):
-                    exit_px  = Pxs_df.loc[dt, inst]
+                    exit_px      = Pxs_df.loc[dt, inst]
                     inst_ret_pct = (exit_px / h['entry_px'] - 1)
                     # Short position: profit when instrument falls
-                    pnl      = -inst_ret_pct * h['weight']
+                    # Deduct 10bps entry + 10bps exit = 20bps round-trip per instrument
+                    trade_cost = 2 * TRADING_COST_BPS / 10000 * h['weight']
+                    pnl        = -inst_ret_pct * h['weight'] - trade_cost
                     total_pnl += pnl
                     print(f"  {inst:<10}  {h['entry_px']:>12.4f}  {exit_px:>12.4f}  "
                           f"{h['weight']:>8.2%}  {pnl:>+9.4%}")
@@ -1453,8 +1455,10 @@ def run_hedge_backtest(Pxs_df:            pd.DataFrame,
                           f"{h['weight']:>8.2%}  {'n/a':>10}")
 
             hedge_account += total_pnl
+            total_costs = sum(2 * TRADING_COST_BPS / 10000 * h['weight']
+                              for h in active_hedges.values())
             print(f"  {'─'*57}")
-            print(f"  Episode P&L : {total_pnl:+.4%}")
+            print(f"  Episode P&L : {total_pnl:+.4%}  (incl. {total_costs*100:.2f}bps round-trip costs)")
             print(f"  Hedge acct  : {hedge_account:+.4%} (pending sweep at next rebal)")
 
             days_held = (dt - active_hedges[list(active_hedges.keys())[0]]['entry_dt']).days
