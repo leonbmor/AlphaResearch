@@ -849,7 +849,23 @@ def _apply_advp_cap(weights: pd.Series,
             w = w / w.sum()   # renormalise before capping
 
     # Iterative water-filling for remaining stocks
-    water_capped = set()   # only stocks where weight was REDUCED by the cap
+    # Set of tickers where ADVP cap (not max_weight) is the binding constraint
+    advp_binding = {tkr for tkr, cap in adv_cap_w.items()
+                    if cap < max_weight - 1e-6 and tkr not in excluded}
+
+    # Track raw ADVP caps (before min with max_weight) to distinguish binding constraint
+    advp_only_cap = {}   # cap derived purely from ADVP (may be > max_weight)
+    for tkr in tickers:
+        if tkr in excluded:
+            advp_only_cap[tkr] = 0.0
+        elif tkr not in Pxs_df.columns or tkr not in volumeRaw_df.columns:
+            advp_only_cap[tkr] = max_weight * 10   # effectively unconstrained by ADVP
+        else:
+            advp_only_cap[tkr] = adv_cap_w.get(tkr, max_weight * 10)
+            # If adv_cap_w was set as min(cap_w, max_weight), recover raw cap_w
+            # by checking if it equals max_weight (means ADVP wasn't binding)
+
+    water_capped = set()   # only stocks where ADVP cap (not max_weight) was binding
     for _ in range(20):
         excess = 0.0
         newly_capped = set()
@@ -858,7 +874,9 @@ def _apply_advp_cap(weights: pd.Series,
             if w.get(tkr, 0) > cap + 1e-8:
                 excess += w[tkr] - cap
                 w[tkr]  = cap
-                newly_capped.add(tkr)
+                # Only flag if ADVP cap is strictly below max_weight
+                if adv_cap_w.get(tkr, max_weight) < max_weight - 1e-6:
+                    newly_capped.add(tkr)
         water_capped |= newly_capped
         if excess < 1e-6:
             break
@@ -2129,7 +2147,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     rebal_input   = input(f"  Rebalancing frequency in days [default={MB_REBAL_FREQ}]: ").strip()
     sector_input  = input("  Max stocks per sector (or Enter to skip): ").strip()
     mktcap_input  = input("  Min market cap floor ($M, or Enter to skip): ").strip()
-    advp_input    = input(f"  ADVP cap — max % of median daily $ volume per stock [default=2%]: ").strip()
+    advp_input    = input(f"  ADVP cap — max % of median daily $ volume per stock [default=4%]: ").strip()
     vol_input     = input("  Apply vol filter? (y/n) [default=n]: ").strip().lower()
     prefilt_input = input("  Pre-filter fraction by composite score 0<x<=1 (or Enter for none): ").strip()
     conc_input    = input("  Concentration factor for Pure Alpha >=1.0 (or Enter for equal weight): ").strip()
@@ -2138,7 +2156,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     rebal_freq   = int(rebal_input)          if rebal_input   else MB_REBAL_FREQ
     sector_cap   = int(sector_input)         if sector_input  else None
     mktcap_floor = float(mktcap_input) * 1e6 if mktcap_input  else None
-    advp_cap     = float(advp_input) / 100   if advp_input    else 0.02
+    advp_cap     = float(advp_input) / 100   if advp_input    else 0.04
     use_vol      = vol_input == 'y'
     prefilt_pct  = float(prefilt_input)      if prefilt_input else 1.0
     if prefilt_pct <= 0 or prefilt_pct > 1:
@@ -2855,6 +2873,38 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 vd_val   = float(row['vol_diff'])
                 regime   = str(row['live_strategy'])
                 w_new    = triggers_dyn[dt].get('smart', pd.Series(dtype=float))
+                if w_new.empty:
+                    continue
+
+                # Apply ADVP cap to cached weights — same constraint as main loop
+                if volumeRaw_df is not None and advp_cap > 0:
+                    # Filter to liquid stocks only
+                    curr_aum_dyn = AUM * _running_nav
+                    if curr_aum_dyn > 0:
+                        past_d_dyn = [d for d in Pxs_df.index if d <= dt][-ADV_WINDOW:]
+                        liquid_tkrs = []
+                        for tkr in w_new.index:
+                            if tkr not in Pxs_df.columns or tkr not in volumeRaw_df.columns:
+                                liquid_tkrs.append(tkr)
+                                continue
+                            px_s  = Pxs_df.loc[past_d_dyn, tkr].dropna()
+                            vol_s = volumeRaw_df.loc[past_d_dyn, tkr].dropna()
+                            com   = px_s.index.intersection(vol_s.index)
+                            if len(com) < 3:
+                                liquid_tkrs.append(tkr)
+                                continue
+                            dv    = (px_s.reindex(com) * vol_s.reindex(com).replace({0: np.nan})).median()
+                            if (dv * advp_cap) / curr_aum_dyn >= min_weight:
+                                liquid_tkrs.append(tkr)
+                        # Restrict to liquid stocks and renormalise
+                        w_new = w_new.reindex(liquid_tkrs).fillna(0)
+                        w_new = w_new[w_new > 0]
+                        if w_new.sum() > 0:
+                            w_new = w_new / w_new.sum()
+                        # Apply ADVP cap via water-filling
+                        w_new, _ = _apply_advp_cap(
+                            w_new, dt, Pxs_df, volumeRaw_df,
+                            curr_aum_dyn, advp_cap, min_weight, max_weight)
                 if w_new.empty:
                     continue
 
