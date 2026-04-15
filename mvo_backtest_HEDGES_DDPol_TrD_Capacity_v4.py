@@ -716,9 +716,10 @@ def _get_cached_portfolio_dates(params_hash, model_version):
 
 
 def _save_daily_portfolios(dt, model_version, params_hash,
-                            w_alpha, w_mvo, w_hybrid):
+                            w_alpha, w_mvo, w_hybrid, w_smart=None):
     import json
-    for strategy, w in [('alpha', w_alpha), ('mvo', w_mvo), ('hybrid', w_hybrid)]:
+    for strategy, w in [('alpha', w_alpha), ('mvo', w_mvo),
+                        ('hybrid', w_hybrid), ('smart', w_smart)]:
         if w is None or w.empty:
             continue
         wj = json.dumps({t: float(v) for t, v in w.items()})
@@ -3014,6 +3015,13 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             w_smart = mvo_weights_by_date.get(rdt, pd.Series(dtype=float))
         if not w_smart.empty and w_smart.sum() > 0:
             smart_hybrid_weights_by_date[rdt] = w_smart / w_smart.sum()
+            # Save smart weights to cache
+            try:
+                _save_daily_portfolios(rdt, MB_MODEL_VER, params_hash,
+                                       None, None, None,
+                                       w_smart=smart_hybrid_weights_by_date[rdt])
+            except Exception as e:
+                warnings.warn(f"  Smart cache save failed for {rdt.date()}: {e}")
     # Trading costs for smart hybrid
     _prev_w_sm = pd.Series(dtype=float)
     for rdt in sorted(smart_hybrid_weights_by_date.keys()):
