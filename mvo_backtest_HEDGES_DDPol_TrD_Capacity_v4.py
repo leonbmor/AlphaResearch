@@ -2878,30 +2878,8 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
 
                 # Apply ADVP cap to cached weights — same constraint as main loop
                 if volumeRaw_df is not None and advp_cap > 0:
-                    # Filter to liquid stocks only
                     curr_aum_dyn = AUM * _running_nav
                     if curr_aum_dyn > 0:
-                        past_d_dyn = [d for d in Pxs_df.index if d <= dt][-ADV_WINDOW:]
-                        liquid_tkrs = []
-                        for tkr in w_new.index:
-                            if tkr not in Pxs_df.columns or tkr not in volumeRaw_df.columns:
-                                liquid_tkrs.append(tkr)
-                                continue
-                            px_s  = Pxs_df.loc[past_d_dyn, tkr].dropna()
-                            vol_s = volumeRaw_df.loc[past_d_dyn, tkr].dropna()
-                            com   = px_s.index.intersection(vol_s.index)
-                            if len(com) < 3:
-                                liquid_tkrs.append(tkr)
-                                continue
-                            dv    = (px_s.reindex(com) * vol_s.reindex(com).replace({0: np.nan})).median()
-                            if (dv * advp_cap) / curr_aum_dyn >= min_weight:
-                                liquid_tkrs.append(tkr)
-                        # Restrict to liquid stocks and renormalise
-                        w_new = w_new.reindex(liquid_tkrs).fillna(0)
-                        w_new = w_new[w_new > 0]
-                        if w_new.sum() > 0:
-                            w_new = w_new / w_new.sum()
-                        # Apply ADVP cap via water-filling
                         w_new, _ = _apply_advp_cap(
                             w_new, dt, Pxs_df, volumeRaw_df,
                             curr_aum_dyn, advp_cap, min_weight, max_weight)
