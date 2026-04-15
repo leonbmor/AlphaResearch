@@ -3544,24 +3544,43 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         print(f"  {lbl:<30} {cagr*100:>7.1f}% {vol*100:>7.1f}% "
               f"{sharpe:>8.2f} {mdd*100:>7.1f}% {cagr_dd:>8.2f}x")
 
-    print(f"\n  Yearly returns:")
-    print(f"  {'Year':<6} {'Baseline':>10} {'Pure Alpha':>12} {'MVO':>10} {'Hybrid':>10} {'Smart':>10} {'Dynamic':>10} {'Dyn+Hedge':>11} {'DD Policy':>11}")
-    print(f"  {'-'*104}")
-    for yr in sorted(set(nav_baseline.index.year)):
+    # Pick the primary NAV for AUM tracking — best available strategy
+    _aum_nav = (nav_dd if nav_dd is not None and not nav_dd.empty else
+                nav_dyn_hedged if nav_dyn_hedged is not None and not nav_dyn_hedged.empty else
+                nav_dynamic if nav_dynamic is not None and not nav_dynamic.empty else
+                nav_smart)
+
+    print(f"\n  Yearly returns  (starting AUM: ${AUM:,.0f})")
+    print(f"  {'Year':<6} {'Baseline':>10} {'Pure Alpha':>12} {'MVO':>10} {'Hybrid':>10} {'Smart':>10} {'Dynamic':>10} {'Dyn+Hedge':>11} {'DD Policy':>11} {'Closing AUM':>14}")
+    print(f"  {'-'*119}")
+
+    # Track cumulative NAV for AUM display
+    _cum_nav = 1.0
+    all_years = sorted(set(nav_baseline.index.year))
+    for yr in all_years:
         def yr_ret(nav_s):
             yr_nav = nav_s[nav_s.index.year == yr]
             if len(yr_nav) < 2:
                 return np.nan
             return (yr_nav.iloc[-1] / yr_nav.iloc[0] - 1) * 100
+
+        # Update cumulative NAV
+        if _aum_nav is not None and not _aum_nav.empty:
+            yr_nav_s = _aum_nav[_aum_nav.index.year == yr]
+            if len(yr_nav_s) >= 2:
+                _cum_nav *= (yr_nav_s.iloc[-1] / yr_nav_s.iloc[0])
+        closing_aum = AUM * _cum_nav
+
         dyn_str = f"{yr_ret(nav_dynamic):>+9.2f}%" if (nav_dynamic is not None and not nav_dynamic.empty) else f"{'n/a':>10}"
         hdg_str = f"{yr_ret(nav_dyn_hedged):>+10.2f}%" if (nav_dyn_hedged is not None and not nav_dyn_hedged.empty) else f"{'n/a':>11}"
         dd_str  = f"{yr_ret(nav_dd):>+10.2f}%" if (nav_dd is not None and not nav_dd.empty) else f"{'n/a':>11}"
+        aum_str = f"${closing_aum:>12,.0f}"
         print(f"  {yr:<6} {yr_ret(nav_baseline):>+9.2f}%  "
               f"{yr_ret(nav_alpha):>+10.2f}%  "
               f"{yr_ret(nav_mvo):>+9.2f}%  "
               f"{yr_ret(nav_hybrid):>+9.2f}%  "
               f"{yr_ret(nav_smart):>+9.2f}%  "
-              f"{dyn_str}  {hdg_str}  {dd_str}")
+              f"{dyn_str}  {hdg_str}  {dd_str}  {aum_str}")
 
     # -- Today snapshot --------------------------------------------------------
     today = Pxs_df.index[-1]
