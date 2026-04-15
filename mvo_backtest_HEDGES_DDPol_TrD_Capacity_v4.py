@@ -1842,7 +1842,7 @@ def run_daily_cache_build(
     force_rebuild=False : only compute missing dates (safe to re-run daily)
     force_rebuild=True  : clear cache and recompute all dates
     """
-    ph = _make_params_hash(ic, max_weight, min_weight, zscore_cap, pca_var_threshold,
+    ph = _make_make_params_hash(ic, max_weight, min_weight, zscore_cap, pca_var_threshold,
                       universe_mult, risk_aversion, top_n, conc_factor,
                       prefilt_pct, min_cov_matrices, model_version)
 
