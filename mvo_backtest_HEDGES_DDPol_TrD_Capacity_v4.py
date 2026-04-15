@@ -889,11 +889,24 @@ def _apply_advp_cap(weights: pd.Series,
         for tkr in uncapped:
             w[tkr] += excess * (w[tkr] / total_uncapped)
 
-    # Re-normalise and apply floor/cap
+    # Re-normalise and apply max_weight cap only
+    # (floor is NOT applied here — caller's _mb_floor_then_cap handles that
+    #  for alpha/hybrid; for MVO cached weights we just cap and renorm)
     w = w[w > 1e-8]
     if w.sum() > 0:
         w = w / w.sum()
-    w = _mb_floor_then_cap(w, min_weight, max_weight)
+    # Apply max_weight cap iteratively
+    for _ in range(20):
+        over = w > max_weight + 1e-9
+        if not over.any():
+            break
+        excess  = (w[over] - max_weight).sum()
+        w[over] = max_weight
+        under   = ~over
+        if w[under].sum() > 1e-12:
+            w[under] += excess * (w[under] / w[under].sum())
+        else:
+            w += excess / len(w)
     # Return only water-filled stocks as capped (*** flag) — excluded handled upstream
     return w, water_capped
 
@@ -2873,16 +2886,6 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 vd_val   = float(row['vol_diff'])
                 regime   = str(row['live_strategy'])
                 w_new    = triggers_dyn[dt].get('smart', pd.Series(dtype=float))
-                if w_new.empty:
-                    continue
-
-                # Apply ADVP cap to cached weights — same constraint as main loop
-                if volumeRaw_df is not None and advp_cap > 0:
-                    curr_aum_dyn = AUM * _running_nav
-                    if curr_aum_dyn > 0:
-                        w_new, _ = _apply_advp_cap(
-                            w_new, dt, Pxs_df, volumeRaw_df,
-                            curr_aum_dyn, advp_cap, min_weight, max_weight)
                 if w_new.empty:
                     continue
 
