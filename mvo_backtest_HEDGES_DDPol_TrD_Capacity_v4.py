@@ -1008,6 +1008,8 @@ def _mb_solve_mvo(dt, candidates, composite_scores, Pxs_df, sectors_s,
 
     # -- Diagnostics dict for display ------------------------------------------
     diag = {
+        'n_valid':    len(valid),
+        'n_eligible': len(eligible),
         'vol_ann'        : vol_ann,
         'z_s'            : z_s,
         'alpha_ann'      : alpha * 252,
@@ -2361,30 +2363,69 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         candidates = cands.index.tolist()
 
         # -- ADVP liquidity filter: build liquid universe before alpha ranking --
-        # A stock is liquid enough if its ADVP cap >= min_weight
-        # If not enough liquid stocks, go deeper into ranking until top_n reached
+        # Two thresholds:
+        #   alpha_liquid: cap_w >= min_weight (stock must be holdable at floor)
+        #   mvo_liquid:   cap_w >= min_weight / top_n (any non-trivial allocation)
+        # For MVO: if fewer than n_cands liquid stocks in cands, search deeper
+        # into the full alpha-ranked universe until n_cands reached or exhausted.
         current_aum_filt = AUM * _running_nav
         if volumeRaw_df is not None and current_aum_filt > 0:
-            past_dates_filt = [d for d in Pxs_df.index if d <= dt][-ADV_WINDOW:]
-            liquid_set = set()
-            for tkr in cands.index:
+            past_dates_filt  = [d for d in Pxs_df.index if d <= dt][-ADV_WINDOW:]
+            mvo_min_w        = min_weight / top_n
+
+            def _is_alpha_liquid(tkr):
                 if tkr not in Pxs_df.columns or tkr not in volumeRaw_df.columns:
-                    liquid_set.add(tkr)   # no volume data — assume liquid
-                    continue
+                    return True
                 px_s   = Pxs_df.loc[past_dates_filt, tkr].dropna()
                 vol_s  = volumeRaw_df.loc[past_dates_filt, tkr].dropna()
                 common = px_s.index.intersection(vol_s.index)
                 if len(common) < 3:
-                    liquid_set.add(tkr)   # insufficient history — assume liquid
-                    continue
-                dollar_vol = (px_s.reindex(common) * vol_s.reindex(common).replace({0: np.nan})).median()
-                cap_w      = (dollar_vol * advp_cap) / current_aum_filt
-                if cap_w >= min_weight:
-                    liquid_set.add(tkr)
-            # Filter ranked to liquid stocks only, keep original alpha ranking
-            cands_liquid = cands.reindex([t for t in cands.index if t in liquid_set])
+                    return True
+                dv = (px_s.reindex(common) * vol_s.reindex(common).replace({0: np.nan})).median()
+                return (dv * advp_cap) / current_aum_filt >= min_weight
+
+            def _is_mvo_liquid(tkr):
+                if tkr not in Pxs_df.columns or tkr not in volumeRaw_df.columns:
+                    return True
+                px_s   = Pxs_df.loc[past_dates_filt, tkr].dropna()
+                vol_s  = volumeRaw_df.loc[past_dates_filt, tkr].dropna()
+                common = px_s.index.intersection(vol_s.index)
+                if len(common) < 3:
+                    return True
+                dv = (px_s.reindex(common) * vol_s.reindex(common).replace({0: np.nan})).median()
+                return (dv * advp_cap) / current_aum_filt >= mvo_min_w
+
+            # Alpha liquid: strict threshold, from pre-filtered cands only
+            alpha_liquid_set = {t for t in cands.index if _is_alpha_liquid(t)}
+            cands_liquid     = cands.reindex([t for t in cands.index
+                                              if t in alpha_liquid_set])
+
+            # MVO liquid: permissive threshold, search full universe if needed
+            # Start from pre-filtered cands, then go deeper into full ranking
+            full_ranked = comp_scores.dropna()
+            full_ranked = full_ranked.loc[[t for t in full_ranked.index
+                                           if t in pxs_cols]]
+            full_ranked = full_ranked.sort_values(ascending=False)
+
+            mvo_liquid_list = [t for t in cands.index if _is_mvo_liquid(t)]
+            if len(mvo_liquid_list) < n_cands:
+                # Search beyond pre-filtered cands
+                already = set(cands.index)
+                for tkr in full_ranked.index:
+                    if len(mvo_liquid_list) >= n_cands:
+                        break
+                    if tkr in already:
+                        continue
+                    if _is_mvo_liquid(tkr):
+                        mvo_liquid_list.append(tkr)
+                        already.add(tkr)
+
+            cands_liquid_mvo = full_ranked.reindex(
+                [t for t in full_ranked.index if t in set(mvo_liquid_list)]
+            ).dropna()
         else:
-            cands_liquid = cands
+            cands_liquid     = cands
+            cands_liquid_mvo = cands
 
         # -- Pure alpha weights (concentration) --------------------------------
         ranked  = cands_liquid.sort_values(ascending=False)
@@ -2456,8 +2497,8 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         _prev_w["alpha"] = w_new_a
 
         # -- MVO weights -------------------------------------------------------
-        # Use top n_cands from liquid universe for MVO
-        candidates_liquid = cands_liquid.index.tolist()
+        # Use top n_cands from broader MVO liquid universe
+        candidates_liquid = cands_liquid_mvo.index.tolist()
         mvo_cands = candidates_liquid[:n_cands]
         valid_snap = [d for d in snapshot_dates if d <= dt]
         if not valid_snap:
@@ -2539,6 +2580,14 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
 
         if dt not in mvo_weights_by_date:
             try:
+                # Debug: show filter funnel when MVO regime is active
+                _dd_disp = _sh_nav_running / _sh_hwm - 1
+                if _dd_disp < -SH_DD_HYBRID:
+                    print(f"\n  [MVO filter funnel @ {dt.date()}]"
+                          f"  full_cands={len(cands)}"
+                          f"  alpha_liquid={len(cands_liquid)}"
+                          f"  mvo_liquid={len(cands_liquid_mvo)}"
+                          f"  mvo_cands(top {n_cands})={len(mvo_cands)}")
                 w_mvo, mvo_diag = _mb_solve_mvo(
                         dt            = dt,
                         candidates    = mvo_cands,
@@ -2558,6 +2607,11 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                         top_n             = top_n,
                         min_cov_matrices  = min_cov_matrices,
                     )
+                if _dd_disp < -SH_DD_HYBRID:
+                    print(f"  [MVO solve result @ {dt.date()}]"
+                          f"  valid_in_cov={mvo_diag.get('n_valid', '?')}"
+                          f"  eligible={mvo_diag.get('n_eligible', '?')}"
+                          f"  final_portfolio={len(w_mvo[w_mvo > 1e-6]) if not w_mvo.empty else 0}")
             except Exception as e:
                 print(f"  {dt.date()} MVO ERROR: {e}")
                 w_mvo, mvo_diag = pd.Series(dtype=float), {}
@@ -2566,15 +2620,130 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             w_mvo    = mvo_weights_by_date[dt]
             mvo_diag = _diag_by_date.get(dt, _last_mvo_diag)
 
+            # Self-healing cache: if cached portfolio is too small after ADVP
+            # filtering, invalidate and recompute fresh for this date
+            if volumeRaw_df is not None and AUM * _running_nav > 0:
+                current_aum_chk = AUM * _running_nav
+                past_d_chk = [d for d in Pxs_df.index if d <= dt][-ADV_WINDOW:]
+                n_liquid_chk = 0
+                for tkr in w_mvo[w_mvo > 1e-6].index:
+                    if tkr not in Pxs_df.columns or tkr not in volumeRaw_df.columns:
+                        n_liquid_chk += 1; continue
+                    px_s  = Pxs_df.loc[past_d_chk, tkr].dropna()
+                    vol_s = volumeRaw_df.loc[past_d_chk, tkr].dropna()
+                    com   = px_s.index.intersection(vol_s.index)
+                    if len(com) < 3:
+                        n_liquid_chk += 1; continue
+                    dv = (px_s.reindex(com) * vol_s.reindex(com).replace({0: np.nan})).median()
+                    if (dv * advp_cap) / current_aum_chk >= min_weight:
+                        n_liquid_chk += 1
+                if n_liquid_chk < top_n // 2:
+                    # Cache is stale — recompute fresh
+                    del mvo_weights_by_date[dt]
+                    try:
+                        w_mvo, mvo_diag = _mb_solve_mvo(
+                            dt               = dt,
+                            candidates       = cands_liquid_mvo.index.tolist()[:n_cands],
+                            composite_scores = comp_scores,
+                            Pxs_df           = Pxs_df,
+                            sectors_s        = sectors_s,
+                            volumeTrd_df     = volumeTrd_df,
+                            model_version    = MB_MODEL_VER,
+                            pca_var_threshold = pca_var_threshold,
+                            ic               = ic,
+                            max_weight       = max_weight,
+                            min_weight       = min_weight,
+                            zscore_cap       = zscore_cap,
+                            risk_aversion    = risk_aversion,
+                            X_snapshots      = X_snapshots,
+                            snapshot_dates   = snapshot_dates,
+                            top_n            = top_n,
+                            min_cov_matrices = min_cov_matrices,
+                        )
+                        print(f"\n  [CACHE INVALIDATED @ {dt.date()}] "
+                              f"only {n_liquid_chk} liquid stocks in cache — recomputed fresh")
+                    except Exception as e:
+                        print(f"  {dt.date()} MVO recompute ERROR: {e}")
+                        w_mvo, mvo_diag = pd.Series(dtype=float), {}
+
         if not w_mvo.empty and w_mvo.sum() > 0:
             w_mvo_nz = w_mvo[w_mvo > 1e-6]
 
-            # Apply ADVP cap to MVO weights
+            # Apply ADVP cap to MVO weights with adaptive max_weight.
+            # When few stocks survive ADVP exclusion, relax max_weight so the
+            # portfolio can still be built (1/n_surviving at minimum).
+            current_aum_mvo = AUM * _running_nav
+            if volumeRaw_df is not None and current_aum_mvo > 0:
+                past_d_mvo = [d for d in Pxs_df.index if d <= dt][-ADV_WINDOW:]
+                n_surviving = 0
+                for tkr in w_mvo_nz.index:
+                    if tkr not in Pxs_df.columns or tkr not in volumeRaw_df.columns:
+                        n_surviving += 1; continue
+                    px_s  = Pxs_df.loc[past_d_mvo, tkr].dropna()
+                    vol_s = volumeRaw_df.loc[past_d_mvo, tkr].dropna()
+                    com   = px_s.index.intersection(vol_s.index)
+                    if len(com) < 3:
+                        n_surviving += 1; continue
+                    dv = (px_s.reindex(com) * vol_s.reindex(com).replace({0: np.nan})).median()
+                    if (dv * advp_cap) / current_aum_mvo >= min_weight:
+                        n_surviving += 1
+                # Relax max_weight if too few liquid stocks
+                effective_max_w = max(max_weight,
+                                      1.0 / max(n_surviving, 1)) if n_surviving > 0 else max_weight
+            else:
+                effective_max_w = max_weight
+
             w_mvo_nz, capped_mvo = _apply_advp_cap(
                 w_mvo_nz, dt, Pxs_df, volumeRaw_df,
-                AUM * _running_nav, advp_cap, min_weight, max_weight)
+                AUM * _running_nav, advp_cap, min_weight, effective_max_w)
             if capped_mvo:
                 _advp_capped[dt] = _advp_capped.get(dt, set()) | capped_mvo
+
+            # Nuclear option: if fewer than top_n stocks survive ADVP exclusion,
+            # supplement with next-best liquid stocks from full alpha-ranked universe
+            if len(w_mvo_nz) < top_n and volumeRaw_df is not None:
+                current_aum_sup = AUM * _running_nav
+                comp_dt = composite_by_date.get(dt, pd.Series(dtype=float))
+                if not comp_dt.empty and current_aum_sup > 0:
+                    full_ranked_sup = comp_dt.dropna()
+                    full_ranked_sup = full_ranked_sup.loc[
+                        [t for t in full_ranked_sup.index if t in pxs_cols]
+                    ].sort_values(ascending=False)
+                    existing = set(w_mvo_nz.index)
+                    past_d_sup = [d for d in Pxs_df.index if d <= dt][-ADV_WINDOW:]
+                    added = []
+                    for tkr in full_ranked_sup.index:
+                        if len(w_mvo_nz) + len(added) >= top_n:
+                            break
+                        if tkr in existing:
+                            continue
+                        # Check liquidity at alpha threshold
+                        if tkr not in Pxs_df.columns or tkr not in volumeRaw_df.columns:
+                            added.append(tkr); continue
+                        px_s  = Pxs_df.loc[past_d_sup, tkr].dropna()
+                        vol_s = volumeRaw_df.loc[past_d_sup, tkr].dropna()
+                        com   = px_s.index.intersection(vol_s.index)
+                        if len(com) < 3:
+                            added.append(tkr); continue
+                        dv = (px_s.reindex(com) * vol_s.reindex(com).replace({0: np.nan})).median()
+                        if (dv * advp_cap) / current_aum_sup >= min_weight:
+                            added.append(tkr)
+                    if added:
+                        # Add new stocks with equal share of remaining weight
+                        n_new   = len(added)
+                        n_exist = len(w_mvo_nz)
+                        # Redistribute: existing stocks give up weight proportionally
+                        new_w_per  = 1.0 / (n_exist + n_new)
+                        w_new_stocks = pd.Series(new_w_per, index=added)
+                        w_mvo_nz = pd.concat([w_mvo_nz * (n_exist * new_w_per / w_mvo_nz.sum()
+                                               if w_mvo_nz.sum() > 0 else 1),
+                                              w_new_stocks])
+                        if w_mvo_nz.sum() > 0:
+                            w_mvo_nz = w_mvo_nz / w_mvo_nz.sum()
+                        # Apply ADVP cap again to new combined portfolio
+                        w_mvo_nz, _ = _apply_advp_cap(
+                            w_mvo_nz, dt, Pxs_df, volumeRaw_df,
+                            current_aum_sup, advp_cap, min_weight, effective_max_w)
 
             mvo_weights_by_date[dt] = w_mvo_nz
             _last_mvo_diag    = mvo_diag  # keep for dynamic display
@@ -2712,6 +2881,19 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 w_disp = w_hyb
             w_disp = w_disp[w_disp > 1e-6]
             w_disp = w_disp / w_disp.sum()
+            # Re-apply max_weight cap after renorm using adaptive max based on n stocks
+            _eff_max_disp = max(max_weight, 1.0 / max(len(w_disp), 1))
+            for _ in range(20):
+                over = w_disp > _eff_max_disp + 1e-9
+                if not over.any():
+                    break
+                excess     = (w_disp[over] - _eff_max_disp).sum()
+                w_disp[over] = _eff_max_disp
+                under      = ~over
+                if w_disp[under].sum() > 1e-12:
+                    w_disp[under] += excess * (w_disp[under] / w_disp[under].sum())
+            if w_disp.sum() > 0:
+                w_disp = w_disp / w_disp.sum()
 
             # -- Per-date display: smart hybrid portfolio ----------------------
             eff_n  = 1.0 / (w_disp**2).sum() if len(w_disp) > 0 else 0
