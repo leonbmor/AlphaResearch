@@ -3564,7 +3564,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         if rows:
             print(f"\n  {'Ticker':<10}  {'Δ Dynamic':>12}  {'Δ Dyn+Hedge':>13}  {'Δ DD Policy':>13}")
             print(f"  {'-'*52}")
-            for tkr, dd, dh, dp in sorted(rows, key=lambda x: abs(x[3]), reverse=True):
+            for tkr, dd, dh, dp in sorted(rows, key=lambda x: x[3], reverse=True):
                 hedge_tag = '  [SHORT]' if tkr in active_hedges_now else ''
                 print(f"  {tkr:<10}  {dd:>+11.2f}%  {dh:>+12.2f}%  {dp:>+12.2f}%{hedge_tag}")
         else:
