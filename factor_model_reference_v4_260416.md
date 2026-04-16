@@ -357,20 +357,62 @@ update_cached_weights(gqf_w, cqf_w)
 
 ---
 
-## 10. SCRIPT: `ic_study.py` (Value Factor)
+## 10. SCRIPT: `factor_ic_study.py` (Composite Factor Weights)
 
-**Location:** `/mnt/user-data/outputs/ic_study.py`
-**Entry point:** `run_ic_study(Pxs_df, sectors_s, force_recompute_cache=False)`
-
-Targets `factor_residuals_mom`. Horizons: 21d and 63d.
-
-### Cache Refresh Workflow
+**Location:** `/mnt/user-data/outputs/factor_ic_study.py`
+**Run:** daily (step 4 of pipeline)
+**Entry points:**
 ```python
-ic_ts, ic_summary, ic_annual, weights = run_ic_study(Pxs_df, sectors_s,
-                                                       force_recompute_cache=True)
-# Copy printed _VALUE_TSTAT into factor_model_step1.py
-# Re-run full factor model recalculation
+ic_results, ic_annual, weights_by_year, regime_s = run_ic_study_alpha(
+    Pxs_df, sectors_s, force_recompute_cache=False
+)
+weights_by_year, regime_s = compute_rolling_regime_weights(
+    ic_results, ic_annual, Pxs_df
+)
 ```
+
+### Purpose
+Computes point-in-time factor weights for the composite alpha signal used by `mvo_backtest.py`. Weights are derived from rolling IC (Information Coefficient) observations, conditioned on the current macro regime.
+
+### Factors Covered
+`Quality`, `Idio_Mom`, `Value`, `Mom_12M1` — OU excluded by default.
+
+### Weighting Methodology
+Weights are **regime-similarity weighted IC averages**, not equal-weight and not exponentially time-decayed.
+
+For each rebalance date `t` with current regime `r_t`:
+
+```
+raw_IC(factor) = Σ_{obs < t}  similarity(r_t, r_obs) × IC_obs(factor)
+               / Σ_{obs < t}  similarity(r_t, r_obs)
+
+similarity = triangular kernel: max(0, 1 − |r_t − r_obs|)
+```
+
+Key properties:
+- **Regime-gated**: observations from similar regimes count more than dissimilar ones. A distant observation in an identical regime outweighs a recent one from a different regime.
+- **No time decay**: recency is not rewarded — only regime relevance matters.
+- **Bounded normalization**: raw IC scores clipped to `[ICS_WEIGHT_MIN=0.10, ICS_WEIGHT_MAX=0.50]` then renormalized to sum to 1. No factor can dominate (>50%) or be fully excluded (<10%).
+- **Point-in-time**: uses only IC observations strictly before date `t` — no lookahead bias.
+
+### Regime Definition
+Three states: `0.0` (low rates / easing), `0.5` (neutral), `1.0` (high rates / tightening).
+Built from `build_rates_regime(Pxs_df, w1=63, w2=42, threshold=20)` using `USGG10YR`.
+
+### Outputs
+- `weights_by_year` — `{year: DataFrame(regime × factor)}` — Jan 1 snapshot per year, used by `mvo_backtest.py` for backward compatibility
+- `weights_by_date` — `{date: Series(factor → weight)}` — per-rebalance-date weights (point-in-time)
+- `regime_s` — daily regime score Series
+
+### Factor Score Loaders (called by `mvo_backtest.py`)
+| Function | Source |
+|---|---|
+| `_ics_load_quality(universe, calc_dates, Pxs_df, sectors_s)` | delegates to `load_quality_scores()` → `quality_scores_df` |
+| `_ics_load_idio_mom(universe, model_version)` | reads `v2_factor_residuals_quality` |
+| `_ics_compute_idio_mom_scores(resid_df, calc_dates)` | cumulative residuals over `[t-252, t-21]` |
+| `_ics_load_value(universe, calc_dates, sectors_s, model_version)` | reads `v2_value_scores_df` → falls back to `value_scores_df` |
+| `_ics_load_ou(universe, model_version)` | reads `v2_ou_reversion_df` |
+| `_ics_compute_mom_12m1(universe, calc_dates, Pxs_df)` | pure price computation, no DB |
 
 ---
 

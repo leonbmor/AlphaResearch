@@ -77,6 +77,109 @@ except Exception as _e:
     print(f"  WARNING: DB connection failed: {_e}")
     ENGINE = None
 
+# ===============================================================================
+# PARAMETERS  (all tuneable constants in one place)
+# ===============================================================================
+
+# ── Backtest universe / rebalancing ───────────────────────────────────────────
+MB_START_DATE  = pd.Timestamp('2019-01-01')
+MB_TOP_N       = 20       # default number of stocks
+MB_REBAL_FREQ  = 30       # default rebalance frequency (calendar days)
+MB_MODEL_VER   = 'v2'
+
+# ── Portfolio / position limits ───────────────────────────────────────────────
+AUM              = 20_000_000  # default AUM ($20M)
+TRADING_COST_BPS = 10          # one-way cost (bps)
+VOLUME_WINDOW    = 10          # rolling window for volume de-trending
+ADV_WINDOW       = 20          # days for median ADVP calculation
+VOL_LOOKBACK     = 63          # rolling window for vol filter
+
+# ── MVO covariance estimation ─────────────────────────────────────────────────
+MVO_LOOKBACK         = 252    # return history for cov estimation (days)
+MVO_EWMA_HL          = 126    # EWMA half-life for covariance
+MVO_PCA_VAR_THRESH   = 0.65   # PCA variance explained threshold
+MVO_DEFAULT_IC       = 0.04   # default IC for Grinold-Kahn alpha scaling
+MVO_OVERLAP_TARGET   = 0.65   # target portfolio overlap across cov matrices
+MVO_MAX_WEIGHT       = 0.10   # hard weight cap (single name)
+MVO_ZSCORE_CAP       = 2.50   # composite z-score winsorisation cap
+MVO_MIN_MATRIX_COUNT = 2      # stock must appear in >= N cov matrices
+MVO_MIN_WEIGHT       = 0.025  # floor on non-zero single-name weight
+
+# ── Smart hybrid drawdown thresholds ─────────────────────────────────────────
+SH_DD_ALPHA       = 0.075  # enter hybrid below this drawdown
+SH_DD_HYBRID      = 0.175  # enter MVO below this drawdown
+SH_DD_EXIT_ALPHA  = 0.050  # recovery needed to exit hybrid → alpha
+SH_DD_EXIT_HYBRID = 0.150  # recovery needed to exit MVO → hybrid
+SH_PERSIST_DAYS   = 3      # days signal must persist before regime switch
+
+# ── Dynamic rebalancing triggers ──────────────────────────────────────────────
+DYN_TO_THRESHOLD_ALPHA  = 0.20   # turnover trigger in alpha regime
+DYN_TO_THRESHOLD_HYBRID = 0.25   # turnover trigger in hybrid regime
+DYN_TO_THRESHOLD_MVO    = 0.30   # turnover trigger in MVO regime
+DYN_VOLDIFF_CAP         = 0.175  # max vol increase alongside TO trigger
+DYN_VOLDIFF_DERISK      = -0.750 # vol de-risk trigger (effectively disabled)
+DYN_MIN_HOLD_DAYS       = 7      # minimum days between rebalances
+
+# ── Drawdown policy (strategy 8: Dyn + Hedge + DD) ───────────────────────────
+# Each tuple: (dd_threshold, fraction_of_remaining_to_cut)
+DD_LEVELS = [
+    (0.175, 2/5),  # -17.5%: cut 40% of remaining → 60% exposed
+    (0.300, 3/7),  # -30.0%: cut 43% of remaining → 34% exposed
+    (0.350, 1/2),  # -35.0%: cut 50% of remaining → 17% exposed
+    (0.400, 2/3),  # -40.0%: cut 67% of remaining →  6% exposed
+    (0.450, 1/1),  # -45.0%: cut 100%              →  0% exposed
+]
+DD_REENTRY_PCT      = 0.075  # recovery from trough needed for full re-entry
+DD_REENTRY_CONFIRM  = 5      # days recovery must persist before re-entry
+DD_ANNUAL_RESET_PCT = 0.30   # max YTD DD for calendar-year re-entry
+
+# ── Hedge engine ──────────────────────────────────────────────────────────────
+BETA_WINDOW    = 63     # rolling window for beta calculation
+CORR_WINDOW    = 63     # rolling window for correlation ranking
+EFF_MAV_WINDOW = 20     # MAV window for smoothing effectiveness
+EFF_FLOOR      = 1.0    # minimum effectiveness score to qualify
+CORR_FLOOR     = 0.50   # minimum correlation to portfolio to qualify
+HEDGE_RATIO    = 0.25   # hedge size per instrument (fraction of NAV)
+MAX_HEDGE      = 0.50   # maximum total hedge (fraction of NAV)
+TRIGGER_ASSETS = ['QQQ', 'SPY']  # assets that trigger hedge on/off
+
+# ── Cache / DB table names ────────────────────────────────────────────────────
+MB_COV_CACHE_TBL  = 'mvo_cov_cache'
+MB_X_CACHE_TBL    = 'mvo_x_snapshots'
+DAILY_PORT_TBL    = 'mvo_daily_portfolios'
+DAILY_TRIGGER_TBL = 'mvo_daily_triggers'
+MB_DAILY_PORT_TBL = 'mvo_daily_portfolios'   # alias kept for compatibility
+MB_MIN_COV_MATRICES = 2
+
+# ── ICS / composite score constants ──────────────────────────────────────────
+ICS_MIN_STOCKS = 50
+ICS_WEIGHT_MIN = 0.10
+ICS_WEIGHT_MAX = 0.50
+ICS_MOM_LONG   = 252   # 12M1 momentum lookback (trading days)
+ICS_MOM_SKIP   = 21    # 12M1 momentum skip period
+ICS_MOM_RESID  = {'v1': 'factor_residuals_vol', 'v2': 'v2_factor_residuals_quality'}
+ICS_OU_TBL     = {'v1': 'ou_reversion_df',      'v2': 'v2_ou_reversion_df'}
+ICS_VALUE_TBL  = {'v1': 'value_scores_df',       'v2': 'v2_value_scores_df'}
+
+# ── X-matrix / factor model internals ────────────────────────────────────────
+_MB_MOM_RESID   = {'v1': 'factor_residuals_vol',     'v2': 'v2_factor_residuals_quality'}
+_MB_OU_CACHE    = {'v1': 'ou_reversion_df',           'v2': 'v2_ou_reversion_df'}
+_MB_SCALAR_TBLS = {
+    'v1': {'Beta':'factor_lambdas_mkt','Size':'factor_lambdas_size',
+           'Quality':'factor_lambdas_quality','SI':'factor_lambdas_si',
+           'GK_Vol':'factor_lambdas_vol','Idio_Mom':'factor_lambdas_mom',
+           'Value':'factor_lambdas_joint','OU':'factor_lambdas_ou'},
+    'v2': {'Beta':'v2_factor_lambdas_mkt','Size':'v2_factor_lambdas_size',
+           'Quality':'v2_factor_lambdas_quality','SI':'v2_factor_lambdas_si',
+           'GK_Vol':'v2_factor_lambdas_vol','Idio_Mom':'v2_factor_lambdas_mom',
+           'Value':'v2_factor_lambdas_value','OU':'v2_factor_lambdas_ou'},
+}
+_MB_SEC_TBL     = {'v1': 'factor_lambdas_sec',  'v2': 'v2_factor_lambdas_sec'}
+_MB_LAMBDA_META = {'intercept', 'r2', 'ridge_lambda', 'date'}
+_MB_F_LOOKBACK  = 252
+_MB_F_EWMA_HL   = 42
+
+
 # ── Inline dependency: select_with_sector_cap ─────────────────────────────────
 def select_with_sector_cap(ranked_df, sector_cap, top_n):
     """Select top_n stocks with max sector_cap per sector (relaxes cap if needed)."""
@@ -117,20 +220,64 @@ def apply_vol_filter(tickers, dt, Pxs_df, lookback=63, vol_cap_mult=3.0):
         return list(tickers)
     threshold = vols.median() * vol_cap_mult
     surviving = vols[vols <= threshold].index.tolist()
-    # Keep tickers with no vol data (insufficient history)
-    no_data = [t for t in tickers if t not in vols.index]
+    no_data   = [t for t in tickers if t not in vols.index]
     return surviving + no_data
 
 
-# ── Inline dependencies: ICS constants and helpers (from factor_ic_study.py) ──
-ICS_MIN_STOCKS  = 50
-ICS_WEIGHT_MIN  = 0.10
-ICS_WEIGHT_MAX  = 0.50
-ICS_MOM_LONG    = 252    # 12M1 momentum lookback
-ICS_MOM_SKIP    = 21     # 12M1 momentum skip period
-ICS_MOM_RESID   = {'v1': 'factor_residuals_vol', 'v2': 'v2_factor_residuals_quality'}
-ICS_OU_TBL      = {'v1': 'ou_reversion_df',      'v2': 'v2_ou_reversion_df'}
-ICS_VALUE_TBL   = {'v1': 'value_scores_df',       'v2': 'v2_value_scores_df'}
+def get_universe(Pxs_df, sectors_s, extended_st_dt):
+    """
+    Build stock universe: in DB (income_data), sector-mapped,
+    sufficient price history before extended_st_dt.
+    """
+    try:
+        with ENGINE.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT DISTINCT ticker FROM income_data"
+            )).fetchall()
+        db_tickers = {r[0].upper() for r in rows}
+    except Exception as e:
+        print(f"  WARNING: DB universe query failed ({e}) — using Pxs_df columns")
+        db_tickers = {c.upper() for c in Pxs_df.columns}
+
+    etf_tickers = set(sectors_s.values)
+    pre_dates   = Pxs_df.index[Pxs_df.index < extended_st_dt]
+
+    universe = []
+    for col in Pxs_df.columns:
+        if col in ('SPX',) or col in etf_tickers:
+            continue
+        if col.upper() not in db_tickers:
+            continue
+        if col not in sectors_s.index:
+            continue
+        if len(pre_dates) >= BETA_WINDOW:
+            col_data = Pxs_df.loc[pre_dates[-BETA_WINDOW:], col]
+            if isinstance(col_data, pd.DataFrame):
+                col_data = col_data.iloc[:, 0]
+            if int(col_data.notna().sum()) < BETA_WINDOW // 2:
+                continue
+        universe.append(col)
+
+    print(f"  Universe: {len(universe)} stocks "
+          f"(in DB + sector mapped + sufficient history)")
+    return universe
+
+
+def generate_calc_dates(Pxs_df, step_days=30):
+    """Generate rebalancing dates from MB_START_DATE at step_days intervals."""
+    end_date = Pxs_df.index.max()
+    dates    = []
+    current  = MB_START_DATE
+    while current <= end_date:
+        available = Pxs_df.index[Pxs_df.index >= current]
+        if available.empty:
+            break
+        dates.append(available[0])
+        current += pd.Timedelta(days=step_days)
+    return sorted(set(dates))
+
+
+
 
 def _ics_zscore(s):
     mu, sd = s.mean(), s.std()
@@ -158,88 +305,100 @@ def _ics_bounded_normalize(raw_series, w_min=ICS_WEIGHT_MIN, w_max=ICS_WEIGHT_MA
             s[mid] = s[mid] / s[mid].sum() * remainder
     return s / s.sum() if s.sum() > 0 else s
 
-def _ics_load_quality(universe, calc_dates, Pxs_df, sectors_s):
-    """Load quality scores — delegates to factor_ic_study or factor_model_v2."""
-    try:
-        from factor_ic_study import _ics_load_quality as _fn
-        return _fn(universe, calc_dates, Pxs_df, sectors_s)
-    except ImportError:
-        pass
-    try:
-        from factor_model_v2 import load_quality_scores_v2
-        return load_quality_scores_v2(universe, calc_dates, Pxs_df, sectors_s)
-    except ImportError:
-        pass
-    print("  WARNING: could not load quality scores — factor_ic_study or factor_model_v2 required")
-    return pd.DataFrame(index=calc_dates)
+def run_backtest(factor_by_date, calc_dates, Pxs_df,
+                 use_vol_filter=False, use_mom_12m1=False, use_mom_idio=False,
+                 resid_pivot=None, vol_pivot=None, mktcap_floor=None,
+                 sector_cap=None, top_n=20, mom_weight=1.0,
+                 prefilt_pct=1.0, conc_factor=1.0):
+    """Baseline NAV backtest — pure quality factor, equal-weight."""
+    nav          = 1.0
+    nav_series   = {}
+    portfolio    = []
+    port_records = {}
+    pxs_columns  = set(Pxs_df.columns)
 
-def _ics_load_idio_mom(universe, model_version):
-    """Load idiosyncratic momentum residuals."""
-    try:
-        from factor_ic_study import _ics_load_idio_mom as _fn
-        return _fn(universe, model_version)
-    except ImportError:
-        pass
-    print("  WARNING: could not load idio mom — factor_ic_study required")
-    return pd.DataFrame()
+    for i, rebal_date in enumerate(calc_dates):
+        next_date = calc_dates[i + 1] if i + 1 < len(calc_dates) else Pxs_df.index.max()
 
-def _ics_compute_idio_mom_scores(resid_df, calc_dates):
-    """Compute idio momentum scores from residuals."""
-    try:
-        from factor_ic_study import _ics_compute_idio_mom_scores as _fn
-        return _fn(resid_df, calc_dates)
-    except ImportError:
-        pass
-    if resid_df.empty:
-        return pd.DataFrame(index=calc_dates)
-    scores = resid_df.rolling(ICS_MOM_LONG, min_periods=ICS_MOM_LONG//2).sum()
-    return scores.reindex(calc_dates).ffill()
+        if rebal_date in factor_by_date:
+            fdf = factor_by_date[rebal_date].copy()
+            if mktcap_floor is not None and 'mkt_cap' in fdf.columns:
+                fdf = fdf[fdf['mkt_cap'].fillna(0) >= mktcap_floor]
+            fdf = fdf.loc[[t for t in fdf.index if t in pxs_columns]]
+            if use_vol_filter and len(fdf) > top_n:
+                surviving = apply_vol_filter(fdf.index, rebal_date, Pxs_df)
+                fdf       = fdf.loc[fdf.index.intersection(surviving)]
+            if prefilt_pct < 1.0 and len(fdf) > top_n:
+                n_keep = max(top_n, int(np.ceil(len(fdf) * prefilt_pct)))
+                fdf    = fdf.nlargest(n_keep, 'factor')
+            if len(fdf) < top_n:
+                portfolio = []
+            else:
+                rank_col = 'factor'
+                ranked   = fdf.sort_values(rank_col, ascending=False)
+                if sector_cap is not None:
+                    top = select_with_sector_cap(ranked, sector_cap, top_n)
+                else:
+                    top = ranked.head(top_n)
+                portfolio = [t for t in top.index if t in pxs_columns]
+                n_port    = len(portfolio)
+                n_top_h   = int(np.ceil(n_port / 2))
+                n_bot_h   = n_port - n_top_h
+                if conc_factor == 1.0 or n_bot_h == 0:
+                    weights = {t: 1.0 / n_port for t in portfolio}
+                else:
+                    top_alloc = conc_factor / (conc_factor + 1.0)
+                    bot_alloc = 1.0 / (conc_factor + 1.0)
+                    weights   = {}
+                    for j, t in enumerate(portfolio):
+                        weights[t] = (top_alloc / n_top_h if j < n_top_h
+                                      else bot_alloc / n_bot_h)
+                port_records[rebal_date] = (
+                    list(top.index) + [None] * (top_n - len(top.index))
+                )[:top_n]
 
-def _ics_load_value(universe, calc_dates, sectors_s, model_version):
-    """Load value scores."""
-    try:
-        from factor_ic_study import _ics_load_value as _fn
-        return _fn(universe, calc_dates, sectors_s, model_version)
-    except ImportError:
-        pass
-    try:
-        from factor_model_v2 import load_value_scores_v2
-        return load_value_scores_v2(universe, calc_dates, sectors_s)
-    except ImportError:
-        pass
-    print("  WARNING: could not load value scores — factor_ic_study or factor_model_v2 required")
-    return pd.DataFrame(index=calc_dates)
+        if not portfolio:
+            period_dates = Pxs_df.index[
+                (Pxs_df.index >= rebal_date) & (Pxs_df.index <= next_date)]
+            for d in period_dates:
+                nav_series[d] = nav
+            continue
 
-def _ics_load_ou(universe, model_version):
-    """Load O-U scores."""
-    try:
-        from factor_ic_study import _ics_load_ou as _fn
-        return _fn(universe, model_version)
-    except ImportError:
-        pass
-    # Direct DB fallback using known table names
-    tbl = {'v1': 'ou_reversion_df', 'v2': 'v2_ou_reversion_df'}.get(model_version, 'v2_ou_reversion_df')
-    try:
-        with ENGINE.connect() as conn:
-            df = pd.read_sql(
-                f"SELECT date, ticker, ou_score FROM {tbl} ORDER BY date", conn)
-        df['date'] = pd.to_datetime(df['date'])
-        ou = df.pivot_table(index='date', columns='ticker',
-                            values='ou_score', aggfunc='last')
-        return ou.reindex(columns=universe).apply(_ics_zscore, axis=1)
-    except Exception as e:
-        print(f"  WARNING: O-U load failed ({e}) — skipping")
-        return pd.DataFrame()
+        period_dates = Pxs_df.index[
+            (Pxs_df.index >= rebal_date) & (Pxs_df.index <= next_date)]
+        if len(period_dates) < 2:
+            nav_series[rebal_date] = nav
+            continue
+
+        px_start   = Pxs_df.loc[period_dates[0],  portfolio]
+        px_end     = Pxs_df.loc[period_dates[-1], portfolio]
+        stk_rets   = (px_end / px_start - 1).fillna(0)
+        w_series   = pd.Series(weights).reindex(portfolio).fillna(0)
+        period_ret = (stk_rets * w_series).sum()
+        nav       *= (1 + period_ret)
+
+        px_period  = Pxs_df.loc[period_dates, portfolio]
+        stk_daily  = px_period.div(px_start, axis=1) - 1
+        port_cum   = stk_daily.mul(w_series, axis=1).sum(axis=1)
+        period_nav = nav / (1 + period_ret) * (1 + port_cum)
+        for d, v in period_nav.items():
+            nav_series[d] = v
+
+    nav_s = pd.Series(nav_series).sort_index()
+    if MB_START_DATE not in nav_s.index and not nav_s.empty:
+        nav_s[MB_START_DATE] = 1.0
+        nav_s = nav_s.sort_index()
+
+    port_df = pd.DataFrame.from_dict(
+        port_records, orient='index',
+        columns=[f'Stock{i+1}' for i in range(top_n)]
+    )
+    return nav_s, port_df
 
 def _ics_compute_mom_12m1(universe, calc_dates, Pxs_df):
     """Compute 12M-1M momentum: z-scored return from t-252 to t-21."""
-    try:
-        from factor_ic_study import _ics_compute_mom_12m1 as _fn
-        return _fn(universe, calc_dates, Pxs_df)
-    except ImportError:
-        pass
     print("  Computing 12M1 momentum scores...")
-    all_px_dates  = Pxs_df.index
+    all_px_dates   = Pxs_df.index
     valid_universe = [t for t in universe if t in Pxs_df.columns]
     results = {}
     for dt in calc_dates:
@@ -259,9 +418,35 @@ def _ics_compute_mom_12m1(universe, calc_dates, Pxs_df):
     print(f"  12M1 momentum scores: {len(out)} dates")
     return out.reindex(columns=valid_universe)
 
+def _mb_compute_idio_mom_scores(resid_df, calc_dates):
+    """Fallback: compute idio momentum from residuals if kernel version unavailable."""
+    if resid_df.empty:
+        return pd.DataFrame(index=calc_dates)
+    return resid_df.rolling(ICS_MOM_LONG, min_periods=ICS_MOM_LONG//2).sum().reindex(calc_dates).ffill()
+
+def _mb_load_ou(universe, model_version):
+    """Load O-U scores directly from DB — fallback if kernel version unavailable."""
+    tbl = ICS_OU_TBL.get(model_version, 'v2_ou_reversion_df')
+    try:
+        with ENGINE.connect() as conn:
+            df = pd.read_sql(f"SELECT date, ticker, ou_score FROM {tbl} ORDER BY date", conn)
+        df['date'] = pd.to_datetime(df['date'])
+        ou = df.pivot_table(index='date', columns='ticker', values='ou_score', aggfunc='last')
+        return ou.reindex(columns=universe).apply(_ics_zscore, axis=1)
+    except Exception as e:
+        print(f"  WARNING: O-U load failed ({e}) — skipping")
+        return pd.DataFrame()
+
+
 def _cb_build_composite_scores(universe, calc_dates, Pxs_df, sectors_s,
                                 weights_by_year, regime_s, volumeTrd_df,
                                 model_version, exclude_factors=None):
+    _load_quality   = _ics_load_quality
+    _load_idio_mom  = _ics_load_idio_mom
+    _calc_idio_mom  = _ics_compute_idio_mom_scores
+    _load_value     = _ics_load_value
+    _load_ou        = _mb_load_ou
+    _load_mom12m1   = _ics_compute_mom_12m1
     exclude_factors = exclude_factors or ['OU']
     first_w = next(iter(weights_by_year.values()))
     active  = [f for f in first_w.columns if f not in exclude_factors]
@@ -278,24 +463,43 @@ def _cb_build_composite_scores(universe, calc_dates, Pxs_df, sectors_s,
 
     score_dfs = {}
     if 'Quality' in active:
-        print("  Loading quality scores...")
-        score_dfs['Quality'] = _ics_load_quality(universe, calc_dates, Pxs_df, sectors_s)
+        print("  Loading quality scores...", end=' ')
+        with warnings.catch_warnings(record=True) as _w:
+            warnings.simplefilter('always')
+            score_dfs['Quality'] = _load_quality(universe, calc_dates, Pxs_df, sectors_s)
+        _n = score_dfs['Quality'].notna().any(axis=1).sum() if not score_dfs['Quality'].empty else 0
+        print(f"{_n} dates" if _n else "WARNING: no data returned")
     if 'Idio_Mom' in active:
-        print("  Loading idio momentum...")
-        resid_df = _ics_load_idio_mom(universe, model_version)
-        score_dfs['Idio_Mom'] = _ics_compute_idio_mom_scores(resid_df, calc_dates)
+        print("  Loading idio momentum...", end=' ')
+        with warnings.catch_warnings(record=True) as _w:
+            warnings.simplefilter('always')
+            resid_df = _load_idio_mom(universe, model_version)
+            score_dfs['Idio_Mom'] = _calc_idio_mom(resid_df, calc_dates)
+        _n = score_dfs['Idio_Mom'].notna().any(axis=1).sum() if not score_dfs['Idio_Mom'].empty else 0
+        print(f"{_n} dates" if _n else "WARNING: no data returned")
     if 'Value' in active:
-        print("  Loading value scores...")
-        score_dfs['Value'] = _ics_load_value(universe, calc_dates, sectors_s, model_version)
+        print("  Loading value scores...", end=' ')
+        with warnings.catch_warnings(record=True) as _w:
+            warnings.simplefilter('always')
+            score_dfs['Value'] = _load_value(universe, calc_dates, sectors_s, model_version)
+        _n = score_dfs['Value'].notna().any(axis=1).sum() if not score_dfs['Value'].empty else 0
+        print(f"{_n} dates" if _n else "WARNING: no data returned")
     if 'Mom_12M1' in active:
-        print("  Computing 12M1 momentum...")
-        score_dfs['Mom_12M1'] = _ics_compute_mom_12m1(universe, calc_dates, Pxs_df)
+        print("  Computing 12M1 momentum...", end=' ')
+        score_dfs['Mom_12M1'] = _load_mom12m1(universe, calc_dates, Pxs_df)
+        _n = len(score_dfs['Mom_12M1'])
+        print(f"{_n} dates")
     if 'OU' in active:
-        print("  Loading O-U scores...")
-        ou = _ics_load_ou(universe, model_version)
+        print("  Loading O-U scores...", end=' ')
+        with warnings.catch_warnings(record=True) as _w:
+            warnings.simplefilter('always')
+            ou = _load_ou(universe, model_version)
         if not ou.empty:
             all_d = calc_dates.union(ou.index).sort_values()
             score_dfs['OU'] = ou.reindex(all_d).ffill().reindex(calc_dates)
+            print(f"{ou.shape[0]} dates")
+        else:
+            print("WARNING: no data returned")
 
     composite_by_date = {}
     n = len(calc_dates)
@@ -378,62 +582,68 @@ class _SuppressOutput:
             sys.stdout = self._orig_stdout
         self._devnull.close()
 
-# ===============================================================================
-# PARAMETERS
-# ===============================================================================
 
-MB_START_DATE  = pd.Timestamp('2019-01-01')
-MB_TOP_N       = 20
-MB_REBAL_FREQ  = 30
-MB_MODEL_VER   = 'v2'
 
-# Cache table for precomputed covariance matrices and X snapshots
-MB_COV_CACHE_TBL    = 'mvo_cov_cache'
-MB_DAILY_PORT_TBL   = 'mvo_daily_portfolios'  # daily portfolio cache
-MB_MIN_COV_MATRICES  = 2      # default: stock must appear in >=2 matrices (0=alpha-only)
+# ── Covariance helpers (inlined from mvo_diagnostics.py) ─────────────────────
 
-# Smart hybrid drawdown thresholds (entry into defensive regimes)
-SH_DD_ALPHA    = 0.075   # dd below this: shift from alpha to hybrid
-SH_DD_HYBRID   = 0.175   # dd below this: shift from hybrid to MVO
-# Asymmetric exit thresholds (recovery needed before shifting back)
-SH_DD_EXIT_ALPHA  = 0.050  # dd must recover above this to exit hybrid -> alpha
-SH_DD_EXIT_HYBRID = 0.150  # dd must recover above this to exit MVO -> hybrid
-# Regime persistence (days signal must persist before switching)
-SH_PERSIST_DAYS   = 3      # days signal must persist before regime switch
+def _mvo_ewma_cov(ret_df, hl):
+    """EWMA covariance matrix (T x N returns → N x N). Returns np.ndarray."""
+    T     = len(ret_df)
+    decay = np.log(2) / hl
+    w     = np.exp(-decay * np.arange(T - 1, -1, -1))
+    w    /= w.sum()
+    v     = ret_df.values
+    mu    = (w[:, None] * v).sum(0)
+    d     = v - mu
+    return (d * w[:, None]).T @ d
 
-# Dynamic rebalancing thresholds
-DYN_TO_THRESHOLD_ALPHA  = 0.20   # TO trigger in alpha regime
-DYN_TO_THRESHOLD_HYBRID = 0.25   # TO trigger in hybrid regime
-DYN_TO_THRESHOLD_MVO    = 0.30   # TO trigger in MVO regime (higher bar)
-DYN_VOLDIFF_CAP    = 0.175   # max vol increase allowed alongside TO trigger
-DYN_VOLDIFF_DERISK = -0.750  # de-risk trigger (effectively disabled at -75%)
-DYN_MIN_HOLD_DAYS  = 7       # minimum calendar days between rebalances
 
-# Drawdown policy (8th strategy: Dynamic + Hedge + DD)
-# Drawdown policy — flexible multi-level de-grossing
-# Each tuple: (dd_threshold, fraction_of_remaining_to_cut)
-# Cuts compound: e.g. 100% → 80% → 60% → 42% → 21% → 10.5%
-DD_LEVELS = [
-    (0.175, 2/5),  # at -17.5% DD: cut 40% of remaining → 60% exposed
-    (0.300, 3/7),  # at -30.0% DD: cut 43% of remaining → 34% exposed
-    (0.350, 1/2),  # at -35.0% DD: cut 50% of remaining → 17% exposed
-    (0.400, 2/3),  # at -40.0% DD: cut 67% of remaining →  6% exposed
-    (0.450, 1/1),  # at -45.0% DD: cut 100% of remaining → 0% exposed
-]
-DD_REENTRY_PCT          = 0.075  # theoretical recovery from trough → full re-entry
-DD_REENTRY_CONFIRM      = 5      # days recovery must persist before re-entry
-DD_ANNUAL_RESET_PCT     = 0.30   # max YTD DD allowed for calendar-year re-entry
+def _mvo_ewma_vol(ret_df, hl):
+    """EWMA volatility per stock. Returns pd.Series."""
+    T     = len(ret_df)
+    decay = np.log(2) / hl
+    w     = np.exp(-decay * np.arange(T - 1, -1, -1))
+    w    /= w.sum()
+    v     = ret_df.values
+    mu    = (w[:, None] * v).sum(0)
+    var   = (w[:, None] * (v - mu) ** 2).sum(0)
+    return pd.Series(np.sqrt(var), index=ret_df.columns)
 
-# Daily cache builder
-VOL_LOOKBACK      = 63                   # trading days for rolling vol
-DAILY_PORT_TBL    = 'mvo_daily_portfolios'
-DAILY_TRIGGER_TBL = 'mvo_daily_triggers'
 
-# Trading costs
-TRADING_COST_BPS = 10    # one-way cost in basis points (10bps = 0.10%)
-VOLUME_WINDOW    = 10        # rolling mean window for volume de-trending
-ADV_WINDOW       = 20        # days for median ADV calculation (dollar volume)
-AUM              = 1_000_000 # starting AUM in dollars (2019-01-01)
+def _mvo_ledoit_wolf(ret_matrix):
+    """Ledoit-Wolf shrinkage. Returns (Sigma_lw, rho_bar, shrinkage_coef)."""
+    from sklearn.covariance import LedoitWolf
+    T, N        = ret_matrix.shape
+    lw          = LedoitWolf(assume_centered=False)
+    lw.fit(ret_matrix)
+    Sigma_lw    = lw.covariance_
+    shrink_coef = float(lw.shrinkage_)
+    std         = np.sqrt(np.diag(Sigma_lw))
+    std_mat     = np.outer(std, std)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        Corr = np.where(std_mat > 0, Sigma_lw / std_mat, 0.0)
+    n_off   = N * (N - 1)
+    rho_bar = (Corr.sum() - np.trace(Corr)) / n_off if n_off > 0 else 0.0
+    return Sigma_lw, rho_bar, shrink_coef
+
+
+def _mvo_pca_cov(ret_matrix, var_threshold=MVO_PCA_VAR_THRESH):
+    """PCA covariance. Returns (Sigma_pca, n_components, var_explained, eigvals)."""
+    Sigma            = _mvo_ewma_cov(pd.DataFrame(ret_matrix), MVO_EWMA_HL)
+    eigvals, eigvecs = np.linalg.eigh(Sigma)
+    idx              = np.argsort(eigvals)[::-1]
+    eigvals          = np.maximum(eigvals[idx], 0.0)
+    eigvecs          = eigvecs[:, idx]
+    total_var        = eigvals.sum()
+    cum_var          = np.cumsum(eigvals) / total_var if total_var > 0 else np.zeros_like(eigvals)
+    n_comp           = max(1, int(np.searchsorted(cum_var, var_threshold) + 1))
+    var_expl         = float(cum_var[n_comp - 1])
+    Vk               = eigvecs[:, :n_comp]
+    Lk               = np.diag(eigvals[:n_comp])
+    Sigma_pca        = Vk @ Lk @ Vk.T
+    resid_var        = np.diag(Sigma) - np.diag(Sigma_pca)
+    Sigma_pca       += np.diag(np.maximum(resid_var, 0.0))
+    return Sigma_pca, n_comp, var_expl, eigvals
 
 
 # ===============================================================================
@@ -566,22 +776,7 @@ def _mb_build_cov_matrices(dt, candidates, Pxs_df, sectors_s,
 # SELF-CONTAINED X-MATRIX BUILDERS (no portfolio_risk_decomp dependency)
 # ===============================================================================
 
-_MB_MOM_RESID   = {'v1': 'factor_residuals_vol',     'v2': 'v2_factor_residuals_quality'}
-_MB_OU_CACHE    = {'v1': 'ou_reversion_df',           'v2': 'v2_ou_reversion_df'}
-_MB_SCALAR_TBLS = {
-    'v1': {'Beta':'factor_lambdas_mkt','Size':'factor_lambdas_size',
-           'Quality':'factor_lambdas_quality','SI':'factor_lambdas_si',
-           'GK_Vol':'factor_lambdas_vol','Idio_Mom':'factor_lambdas_mom',
-           'Value':'factor_lambdas_joint','OU':'factor_lambdas_ou'},
-    'v2': {'Beta':'v2_factor_lambdas_mkt','Size':'v2_factor_lambdas_size',
-           'Quality':'v2_factor_lambdas_quality','SI':'v2_factor_lambdas_si',
-           'GK_Vol':'v2_factor_lambdas_vol','Idio_Mom':'v2_factor_lambdas_mom',
-           'Value':'v2_factor_lambdas_value','OU':'v2_factor_lambdas_ou'},
-}
-_MB_SEC_TBL     = {'v1': 'factor_lambdas_sec',  'v2': 'v2_factor_lambdas_sec'}
-_MB_LAMBDA_META = {'intercept', 'r2', 'ridge_lambda', 'date'}
-_MB_F_LOOKBACK  = 252
-_MB_F_EWMA_HL   = 42
+
 
 
 def _mb_zscore(s):
@@ -700,42 +895,37 @@ def _mb_sector_dummies(universe, sectors_s, sec_cols):
 
 def _mb_build_X(dt, universe, factor_names, sec_cols,
                  Pxs_df, sectors_s, volumeTrd_df, model_version):
-    """Self-contained X matrix builder -- no _rd_build_X dependency."""
-    pxs_to_dt = Pxs_df.loc[:dt]
+    """Self-contained X matrix builder -- uses kernel factor model functions."""
+    pxs_to_dt  = Pxs_df.loc[:dt]
     if len(pxs_to_dt) < BETA_WINDOW // 2:
         return None
     calc_dates = pd.DatetimeIndex([dt])
+
+    # Resolve kernel functions
+    # These functions come from factor_model_step1 (run before mvo_backtest)
     try:
         beta_df = calc_rolling_betas(pxs_to_dt, universe, calc_dates)
         beta_s  = _mb_zscore(beta_df.iloc[-1].reindex(universe)).rename('Beta')
 
         size_df = load_dynamic_size(universe, pxs_to_dt, calc_dates)
-        size_s  = _mb_zscore(
-            np.log(size_df.iloc[-1].reindex(universe).clip(lower=1e-6))
-        ).rename('Size')
+        size_s  = _mb_zscore(np.log(size_df.iloc[-1].reindex(universe).clip(lower=1e-6))).rename('Size')
 
         macro_betas  = calc_macro_betas(pxs_to_dt, universe, calc_dates)
         macro_series = {}
         for mc in MACRO_COLS:
             if mc in macro_betas and not macro_betas[mc].empty:
-                macro_series[mc] = _mb_zscore(
-                    macro_betas[mc].iloc[-1].reindex(universe)
-                ).rename(mc)
+                macro_series[mc] = _mb_zscore(macro_betas[mc].iloc[-1].reindex(universe)).rename(mc)
             else:
                 macro_series[mc] = pd.Series(0.0, index=universe, name=mc)
 
         dummies = _mb_sector_dummies(universe, sectors_s, sec_cols)
 
         quality_df = load_quality_scores(universe, calc_dates, pxs_to_dt, sectors_s)
-        quality_s  = _mb_zscore(
-            quality_df.reindex(calc_dates).iloc[-1].reindex(universe)
-        ).rename('Quality')
+        quality_s  = _mb_zscore(quality_df.reindex(calc_dates).iloc[-1].reindex(universe)).rename('Quality')
 
         recent_dates = pxs_to_dt.index[-60:]
         si_full = load_si_composite(universe, recent_dates)
-        si_s    = _mb_zscore(
-            si_full.reindex(recent_dates).ffill().iloc[-1].reindex(universe)
-        ).rename('SI')
+        si_s    = _mb_zscore(si_full.reindex(recent_dates).ffill().iloc[-1].reindex(universe)).rename('SI')
 
         open_df, high_df, low_df = load_ohlc_tables(universe)
         vol_df = calc_vol_factor(pxs_to_dt, universe, calc_dates,
@@ -745,14 +935,11 @@ def _mb_build_X(dt, universe, factor_names, sec_cols,
         try:
             with ENGINE.connect() as conn:
                 res_mom = pd.read_sql(
-                    f"SELECT * FROM {_MB_MOM_RESID[model_version]} ORDER BY date",
-                    conn
-                )
+                    f"SELECT * FROM {_MB_MOM_RESID[model_version]} ORDER BY date", conn)
             res_mom['date'] = pd.to_datetime(res_mom['date'])
             if 'ticker' in res_mom.columns and 'resid' in res_mom.columns:
                 res_mom = res_mom.pivot_table(
-                    index='date', columns='ticker',
-                    values='resid', aggfunc='last'
+                    index='date', columns='ticker', values='resid', aggfunc='last'
                 ).reindex(columns=universe)
             else:
                 res_mom = res_mom.set_index('date').reindex(columns=universe)
@@ -767,9 +954,7 @@ def _mb_build_X(dt, universe, factor_names, sec_cols,
             mom_s = pd.Series(0.0, index=universe, name='Idio_Mom')
 
         value_df = load_value_scores(universe, calc_dates, sectors_s)
-        value_s  = _mb_zscore(
-            value_df.reindex(calc_dates).iloc[-1].reindex(universe)
-        ).rename('Value')
+        value_s  = _mb_zscore(value_df.reindex(calc_dates).iloc[-1].reindex(universe)).rename('Value')
 
         try:
             with ENGINE.connect() as conn:
@@ -824,7 +1009,6 @@ def _mb_month_end_dates(date_index, latest_date):
 # X SNAPSHOT CACHE (PostgreSQL-backed)
 # ===============================================================================
 
-MB_X_CACHE_TBL = 'mvo_x_snapshots'
 
 
 def _mb_save_x_snapshot(dt, model_version, xdf):
@@ -1612,15 +1796,7 @@ def _portfolio_vol(w, Pxs_df, dt, lookback=VOL_LOOKBACK):
 # HEDGE ENGINE (embedded from hedge_engine.py)
 # ================================================================================
 
-# ── Default parameters ────────────────────────────────────────────────────────
-BETA_WINDOW    = 63     # rolling window for beta calculation
-CORR_WINDOW    = 63     # rolling window for correlation ranking
-EFF_MAV_WINDOW = 20     # MAV window for smoothing effectiveness
-EFF_FLOOR      = 1.0    # minimum effectiveness score to qualify
-CORR_FLOOR     = 0.50   # minimum correlation to portfolio to qualify
-HEDGE_RATIO    = 0.25   # hedge size per instrument (fraction of portfolio NAV)
-MAX_HEDGE      = 0.50   # maximum total hedge (fraction of portfolio NAV)
-TRIGGER_ASSETS = ['QQQ', 'SPY']  # assets whose signal triggers hedge on/off
+
 
 
 # ================================================================================
