@@ -114,12 +114,12 @@ SH_DD_EXIT_HYBRID = 0.150  # recovery needed to exit MVO → hybrid
 SH_PERSIST_DAYS   = 3      # days signal must persist before regime switch
 
 # ── Dynamic rebalancing triggers ──────────────────────────────────────────────
-DYN_TO_THRESHOLD_ALPHA  = 0.20   # turnover trigger in alpha regime
-DYN_TO_THRESHOLD_HYBRID = 0.25   # turnover trigger in hybrid regime
-DYN_TO_THRESHOLD_MVO    = 0.30   # turnover trigger in MVO regime
+DYN_TO_THRESHOLD_ALPHA  = 0.25   # turnover trigger in alpha regime
+DYN_TO_THRESHOLD_HYBRID = 0.30   # turnover trigger in hybrid regime
+DYN_TO_THRESHOLD_MVO    = 0.35   # turnover trigger in MVO regime
 DYN_VOLDIFF_CAP         = 0.175  # max vol increase alongside TO trigger
 DYN_VOLDIFF_DERISK      = -0.750 # vol de-risk trigger (effectively disabled)
-DYN_MIN_HOLD_DAYS       = 7      # minimum days between rebalances
+DYN_MIN_HOLD_DAYS       = 10     # minimum days between rebalances
 
 # ── Drawdown policy (strategy 8: Dyn + Hedge + DD) ───────────────────────────
 # Each tuple: (dd_threshold, fraction_of_remaining_to_cut)
@@ -4476,8 +4476,28 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             else:
                 w_dyn_old = w_prev_rebal
         else:
-            w_dyn_old = w_dyn_deployed
-            w_dyn_new = w_dyn_deployed
+            # No rebalance today — show hypothetical trades vs drifted current portfolio
+            # w_dyn_old = current drifted weights, w_dyn_new = hypothetical new portfolio
+            last_rebal_recs = [r for r in _dyn_rebal_log if r['dt'] <= today_ts]
+            if last_rebal_recs:
+                last_rebal_dt = last_rebal_recs[-1]['dt']
+                w_last_rebal  = last_rebal_recs[-1]['w']
+                # Drift to today
+                tks_last = [t for t in w_last_rebal.index if t in Pxs_df.columns]
+                if tks_last and last_rebal_dt in Pxs_df.index and today_ts in Pxs_df.index:
+                    px_last = Pxs_df.loc[last_rebal_dt, tks_last]
+                    px_now  = Pxs_df.loc[today_ts,      tks_last]
+                    w_drift = w_last_rebal.reindex(tks_last) * (px_now / px_last).fillna(1)
+                    w_dyn_old = (w_drift / w_drift.sum()) if w_drift.sum() > 0 else w_last_rebal
+                else:
+                    w_dyn_old = w_last_rebal
+            else:
+                w_dyn_old = w_dyn_deployed
+            # Hypothetical new portfolio = today's smart hybrid snapshot
+            try:
+                w_dyn_new = w_smart_t if w_smart_t is not None and not w_smart_t.empty else w_dyn_deployed
+            except Exception:
+                w_dyn_new = w_dyn_deployed
 
         # For Dyn+Hedge: same stock weights, plus active hedge short positions
         active_hedges_now = hedge_results.get('active_hedges', {}) if hedge_results else {}
@@ -4536,7 +4556,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             if abs(delta_dyn) > 0.01 or abs(delta_hdg) > 0.01 or abs(delta_dd) > 0.01:
                 rows.append((tkr, delta_dyn, delta_hdg, delta_dd))
 
-        label = "[ACTUAL TRADES]" if has_actual else "[THEORETICAL — no changes required today]"
+        label = "[ACTUAL TRADES]" if has_actual else "[THEORETICAL — hypothetical rebalance if triggered today]"
         print(f"\n  {label}")
         if rows:
             print(f"\n  {'Ticker':<10}  {'Δ Dynamic':>12}  {'Δ Dyn+Hedge':>13}  {'Δ DD Policy':>13}")
@@ -4545,7 +4565,11 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 hedge_tag = '  [SHORT]' if tkr in active_hedges_now else ''
                 print(f"  {tkr:<10}  {dd:>+11.2f}%  {dh:>+12.2f}%  {dp:>+12.2f}%{hedge_tag}")
         else:
-            print(f"\n  No material allocation changes  (threshold: 0.01%)")
+            if has_actual:
+                print(f"\n  No material allocation changes  (threshold: 0.01%)")
+            else:
+                print(f"\n  Hypothetical portfolio identical to current drifted weights — "
+                      f"no trades would be made if rebalancing today")
     except Exception as e:
         print(f"  Could not compute trade summary: {e}")
 
