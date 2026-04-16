@@ -4235,30 +4235,19 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             w_live_dyn  = dyn_weights_by_date[live_dt_dyn]
             w_live_dyn  = w_live_dyn[w_live_dyn > 1e-6].sort_values(ascending=False)
             tickers_dyn = [t for t in w_live_dyn.index if t in Pxs_df.columns]
-            # Always compute drift — use previous trading day as base if rebal was today
-            if tickers_dyn:
-                if live_dt_dyn < today_ts:
-                    px_base_dyn  = Pxs_df.loc[live_dt_dyn, tickers_dyn]
-                    px_today_dyn = Pxs_df.loc[today_ts, tickers_dyn]
-                else:
-                    # Rebalanced today — show drift from previous trading day
-                    prev_dates = Pxs_df.index[Pxs_df.index < today_ts]
-                    if len(prev_dates) > 0:
-                        px_base_dyn  = Pxs_df.loc[prev_dates[-1], tickers_dyn]
-                        px_today_dyn = Pxs_df.loc[today_ts, tickers_dyn]
-                    else:
-                        px_base_dyn  = None
-                        px_today_dyn = None
-                if px_base_dyn is not None:
-                    w_drift_dyn = w_live_dyn.reindex(tickers_dyn) * (px_today_dyn / px_base_dyn).fillna(1)
-                    if w_drift_dyn.sum() > 0:
-                        w_drift_dyn = w_drift_dyn / w_drift_dyn.sum()
-                    else:
-                        w_drift_dyn = w_live_dyn.reindex(tickers_dyn)
+            # If rebalanced today: portfolio is at target weights, no drift yet
+            if live_dt_dyn == today_ts:
+                w_drift_dyn = w_live_dyn.reindex(tickers_dyn) if tickers_dyn else w_live_dyn
+            elif tickers_dyn and live_dt_dyn in Pxs_df.index:
+                px_rebal_dyn = Pxs_df.loc[live_dt_dyn, tickers_dyn]
+                px_today_dyn = Pxs_df.loc[today_ts, tickers_dyn]
+                w_drift_dyn  = w_live_dyn.reindex(tickers_dyn) * (px_today_dyn / px_rebal_dyn).fillna(1)
+                if w_drift_dyn.sum() > 0:
+                    w_drift_dyn = w_drift_dyn / w_drift_dyn.sum()
                 else:
                     w_drift_dyn = w_live_dyn.reindex(tickers_dyn)
             else:
-                w_drift_dyn = w_live_dyn
+                w_drift_dyn = w_live_dyn.reindex(tickers_dyn) if tickers_dyn else w_live_dyn
             last_rebal_rec = next((r for r in reversed(_dyn_rebal_log)
                                    if r['dt'] == live_dt_dyn), None)
             if last_rebal_rec:
@@ -4266,8 +4255,11 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 trigger_info = f"  trigger={last_rebal_rec['trigger']}  [{ttype}]"
             else:
                 trigger_info = ""
+            rebal_note = "  *** REBALANCED TODAY — weights at target ***" if live_dt_dyn == today_ts else ""
             print(f"\n  Rebalance: {live_dt_dyn.date()}  |  As of: {today_ts.date()}"
                   f"  |  {len(w_live_dyn)} positions{trigger_info}")
+            if rebal_note:
+                print(f"  {rebal_note}")
             print(f"  {'Ticker':<8}  {'Rebal Wt%':>10}  {'Curr Wt%':>10}  {'Drift':>8}  Sector")
             print("  " + "-" * 60)
             for tkr in w_live_dyn.index:
@@ -4462,11 +4454,27 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         past_dyn = sorted([d for d in dyn_weights_by_date if d <= today_ts])
         w_dyn_deployed = dyn_weights_by_date[past_dyn[-1]] if past_dyn else pd.Series(dtype=float)
 
-        # For trade summary: "old" = what was deployed BEFORE today's rebalance
+        # For trade summary: "old" = drifted weights just before today's rebalance
         # "new" = what was just set by today's rebalance
         if dyn_rebal_today and len(past_dyn) >= 2:
-            w_dyn_old = dyn_weights_by_date[past_dyn[-2]]  # pre-rebal portfolio
-            w_dyn_new = w_dyn_deployed                      # post-rebal portfolio
+            w_dyn_new = w_dyn_deployed                        # post-rebal
+            # Get previous rebalance weights directly from rebal log
+            prev_rebal_recs = [r for r in _dyn_rebal_log if r['dt'] < today_ts]
+            if prev_rebal_recs:
+                prev_rebal_dt = prev_rebal_recs[-1]['dt']
+                w_prev_rebal  = prev_rebal_recs[-1]['w']      # actual rebal weights
+            else:
+                prev_rebal_dt = past_dyn[-2]
+                w_prev_rebal  = dyn_weights_by_date[prev_rebal_dt]
+            # Drift those weights to today using price moves
+            tks_prev = [t for t in w_prev_rebal.index if t in Pxs_df.columns]
+            if tks_prev and prev_rebal_dt in Pxs_df.index and today_ts in Pxs_df.index:
+                px_prev   = Pxs_df.loc[prev_rebal_dt, tks_prev]
+                px_now    = Pxs_df.loc[today_ts,      tks_prev]
+                w_drift   = w_prev_rebal.reindex(tks_prev) * (px_now / px_prev).fillna(1)
+                w_dyn_old = (w_drift / w_drift.sum()) if w_drift.sum() > 0 else w_prev_rebal
+            else:
+                w_dyn_old = w_prev_rebal
         else:
             w_dyn_old = w_dyn_deployed
             w_dyn_new = w_dyn_deployed
