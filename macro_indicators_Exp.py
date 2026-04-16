@@ -1576,6 +1576,10 @@ def plot_effectiveness(multi_result: dict,
     ax.legend(fontsize=8, loc='upper left', ncol=2,
               framealpha=0.85, edgecolor='#D3D1C7')
 
+    # Set x-axis to actual data range
+    all_dates = pd.concat(eff_dict.values()).index
+    ax.set_xlim(all_dates.min(), all_dates.max())
+
     plt.tight_layout()
     plt.show()
 
