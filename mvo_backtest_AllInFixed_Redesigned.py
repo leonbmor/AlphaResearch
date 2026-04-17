@@ -3021,6 +3021,23 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                                 pr_c  = (w_prev_c.reindex(tks_c).fillna(0) *
                                          (px_ec / px_sc - 1).fillna(0)).sum()
                                 _sh_nav_running = _sh_nav_running * (1 + pr_c)
+                    # Compute dd from actual dynamic portfolio for regime display
+                    _dyn_dates_c = sorted([d for d in dyn_weights_by_date if d <= dt])
+                    if _dyn_dates_c:
+                        _mini_nav_c = 1.0; _mini_hwm_c = 1.0; _prev_c = None
+                        for _ddt_c in _dyn_dates_c:
+                            if _prev_c is not None:
+                                _w_c  = dyn_weights_by_date[_prev_c]
+                                _tk_c = [t for t in _w_c.index if t in pxs_cols]
+                                if _tk_c and _prev_c in Pxs_df.index and _ddt_c in Pxs_df.index:
+                                    _r_c = (_w_c.reindex(_tk_c).fillna(0) *
+                                            (Pxs_df.loc[_ddt_c, _tk_c] /
+                                             Pxs_df.loc[_prev_c, _tk_c] - 1).fillna(0)).sum()
+                                    _mini_nav_c *= (1 + _r_c)
+                            _mini_hwm_c = max(_mini_hwm_c, _mini_nav_c)
+                            _prev_c = _ddt_c
+                        _sh_nav_running = _mini_nav_c
+                        _sh_hwm         = _mini_hwm_c
                     _sh_hwm = max(_sh_hwm, _sh_nav_running)
                     # Run MVO solve for diagnostics, then fall through to display
                     try:
@@ -3308,26 +3325,32 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 _prev_w["hybrid"] = w_hyb
 
             # -- Determine smart hybrid regime for this date -------------------
-            # Update running NAV using daily return of hybrid portfolio
-            # Use previous day's hybrid weights applied to today's price change
-            all_hyb_dates = sorted([d for d in hybrid_weights_by_date if d <= dt])
-            if all_hyb_dates:
-                # Get most recent hybrid weights
-                last_hyb_dt = all_hyb_dates[-1]
-                w_prev_sh   = hybrid_weights_by_date[last_hyb_dt]
-                tks_sh      = [t for t in w_prev_sh.index if t in Pxs_df.columns]
-                # Find previous trading day for daily return
-                prev_days = [d for d in Pxs_df.index if d < dt]
-                if tks_sh and prev_days and dt in Pxs_df.index:
-                    prev_day = prev_days[-1]
-                    if prev_day in Pxs_df.index:
-                        px_s    = Pxs_df.loc[prev_day, tks_sh]
-                        px_e    = Pxs_df.loc[dt,       tks_sh]
-                        day_ret = (w_prev_sh.reindex(tks_sh).fillna(0) *
-                                   (px_e / px_s - 1).fillna(0)).sum()
-                        _sh_nav_running = _sh_nav_running * (1 + day_ret)
-            _sh_hwm = max(_sh_hwm, _sh_nav_running)
-            dd_disp = _sh_nav_running / _sh_hwm - 1
+            # Compute drawdown from ACTUAL dynamic portfolio NAV using
+            # dyn_weights_by_date (already computed by dynamic loop above).
+            # This is the ground truth — no approximation needed.
+            _dyn_dates_so_far = sorted([d for d in dyn_weights_by_date if d <= dt])
+            if _dyn_dates_so_far:
+                # Build mini NAV from dyn_weights up to dt
+                _mini_nav = 1.0
+                _mini_hwm = 1.0
+                _prev_dyn_dt = None
+                for _ddt in _dyn_dates_so_far:
+                    if _prev_dyn_dt is not None:
+                        _w_dyn = dyn_weights_by_date[_prev_dyn_dt]
+                        _tks   = [t for t in _w_dyn.index if t in Pxs_df.columns]
+                        if _tks and _prev_dyn_dt in Pxs_df.index and _ddt in Pxs_df.index:
+                            _r = (_w_dyn.reindex(_tks).fillna(0) *
+                                  (Pxs_df.loc[_ddt, _tks] /
+                                   Pxs_df.loc[_prev_dyn_dt, _tks] - 1).fillna(0)).sum()
+                            _mini_nav *= (1 + _r)
+                    _mini_hwm    = max(_mini_hwm, _mini_nav)
+                    _prev_dyn_dt = _ddt
+                dd_disp = _mini_nav / _mini_hwm - 1
+            else:
+                dd_disp = 0.0
+            # Also update _sh_nav_running / _sh_hwm for backward compat
+            _sh_nav_running = 1.0 + dd_disp   # approximate
+            _sh_hwm         = max(_sh_hwm, _sh_nav_running)
 
             if dd_disp >= -SH_DD_ALPHA:
                 w_disp   = alpha_weights_by_date.get(dt, w_hyb)
