@@ -2435,6 +2435,9 @@ def run_daily_cache_build(
     sh_nav     = 1.0
     sh_hwm     = 1.0
     sh_regime  = 'alpha'                  # current smart hybrid regime (asymmetric)
+    # Simulated rebalance state — mirrors dynamic loop logic for accurate sh_nav
+    _last_rebal_sim      = None           # date of last simulated rebalance
+    _deployed_regime_sim = None           # regime currently deployed in simulation
 
     for idx, dt in enumerate(to_compute):
         if dt not in composite_by_date:
@@ -2526,7 +2529,6 @@ def run_daily_cache_build(
             live_strat = 'mvo'
 
         w_hyb_prev = w_hybrid.copy()
-        w_dyn_prev = w_smart.copy()   # track actual deployed weights for NAV
 
         # -- Trigger variables -------------------------------------------------
         # Drift w_live by today's price moves before comparing
@@ -2553,8 +2555,28 @@ def run_daily_cache_build(
         vol_live = _portfolio_vol(w_live,  Pxs_df, dt) if not w_live.empty else vol_new
         vol_diff = vol_new - vol_live
 
-        # Reset w_live to today's smart hybrid for next day's drift baseline
-        w_live = w_smart.copy()
+        # -- Simulate rebalance decision for accurate sh_nav tracking ----------
+        # Mirror the dynamic loop's trigger logic so sh_nav tracks the portfolio
+        # that is ACTUALLY deployed, not a daily mark-to-model.
+        _days_held_sim = (dt - _last_rebal_sim).days if _last_rebal_sim else 999
+        _to_thr_sim    = (DYN_TO_THRESHOLD_MVO    if _deployed_regime_sim == 'mvo'    else
+                          DYN_TO_THRESHOLD_HYBRID if _deployed_regime_sim == 'hybrid' else
+                          DYN_TO_THRESHOLD_ALPHA)
+        _regime_switch_sim = (_deployed_regime_sim is not None and
+                              live_strat != _deployed_regime_sim and
+                              _days_held_sim >= DYN_MIN_HOLD_DAYS)
+        _to_trigger_sim    = (implied_to > _to_thr_sim and
+                              _days_held_sim >= DYN_MIN_HOLD_DAYS)
+        _should_rebal_sim  = w_live.empty or _regime_switch_sim or _to_trigger_sim
+
+        if _should_rebal_sim:
+            w_live             = w_smart.copy()
+            _last_rebal_sim    = dt
+            _deployed_regime_sim = live_strat
+        # w_live now reflects the simulated deployed portfolio (drifted between rebalances)
+
+        # Update w_dyn_prev for sh_nav computation on the NEXT day
+        w_dyn_prev = w_live.copy()
 
         # -- Save --------------------------------------------------------------
         try:
