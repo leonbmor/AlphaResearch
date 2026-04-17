@@ -2429,8 +2429,9 @@ def run_daily_cache_build(
     t_start    = time.time()
 
     # State trackers
-    w_live     = pd.Series(dtype=float)   # current live portfolio
-    w_hyb_prev = pd.Series(dtype=float)   # previous hybrid for NAV tracking
+    w_live     = pd.Series(dtype=float)   # current live portfolio (drifted)
+    w_dyn_prev = pd.Series(dtype=float)   # previous day's smart weights for NAV tracking
+    w_hyb_prev = pd.Series(dtype=float)   # kept for hybrid computation only
     sh_nav     = 1.0
     sh_hwm     = 1.0
     sh_regime  = 'alpha'                  # current smart hybrid regime (asymmetric)
@@ -2499,13 +2500,16 @@ def run_daily_cache_build(
             w_hybrid = w_hybrid / w_hybrid.sum()
 
         # -- Smart hybrid regime -----------------------------------------------
-        if not w_hyb_prev.empty and idx > 0:
-            prev_dt = to_compute[idx - 1]
-            tks_sh  = [t for t in w_hyb_prev.index if t in pxs_cols]
+        # NAV tracks the ACTUAL deployed portfolio (w_dyn_prev = last smart weights
+        # saved), not a theoretical hybrid — this ensures dd is meaningful for
+        # the dynamic rebalance trigger that consumes live_strategy.
+        if not w_dyn_prev.empty and idx > 0:
+            prev_dt  = to_compute[idx - 1]
+            tks_sh   = [t for t in w_dyn_prev.index if t in pxs_cols]
             if tks_sh and prev_dt in Pxs_df.index and dt in Pxs_df.index:
                 px_s    = Pxs_df.loc[prev_dt, tks_sh]
                 px_e    = Pxs_df.loc[dt,       tks_sh]
-                per_ret = (w_hyb_prev.reindex(tks_sh).fillna(0) *
+                per_ret = (w_dyn_prev.reindex(tks_sh).fillna(0) *
                            (px_e / px_s - 1).fillna(0)).sum()
                 sh_nav  = sh_nav * (1 + per_ret)
         sh_hwm = max(sh_hwm, sh_nav)
@@ -2522,6 +2526,7 @@ def run_daily_cache_build(
             live_strat = 'mvo'
 
         w_hyb_prev = w_hybrid.copy()
+        w_dyn_prev = w_smart.copy()   # track actual deployed weights for NAV
 
         # -- Trigger variables -------------------------------------------------
         # Drift w_live by today's price moves before comparing
