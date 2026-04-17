@@ -3537,41 +3537,8 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
     nav_smart = _mb_run_nav(smart_hybrid_weights_by_date, calc_dates, Pxs_df,
                              cost_by_date=_cost_by_date["smart"])
 
-    # ── DD regime pre-pass ────────────────────────────────────────────────────
-    # Identify dates where DD events fire and the regime they force.
-    # This allows the dynamic loop to treat DD events as forced rebalances
-    # with the correct construction regime (hybrid for lv1, mvo for lv2+).
-    # Uses nav_dyn_hedged if available, otherwise nav_smart as proxy.
-    _dd_forced_regimes = {}   # {date: regime_string}
-    _nav_for_dd = (nav_dyn_hedged if nav_dyn_hedged is not None and not nav_dyn_hedged.empty
-                   else nav_smart if nav_smart is not None and not nav_smart.empty
-                   else None)
-    if _nav_for_dd is not None:
-        _pre_hwm    = _nav_for_dd.iloc[0]
-        _pre_exp    = 1.0
-        _pre_active = False
-        _pre_next   = 0
-        _pre_nav    = _nav_for_dd.iloc[0]
-        for _dt, _raw_nav in _nav_for_dd.items():
-            if not _pre_active:
-                _pre_hwm = max(_pre_hwm, _raw_nav)
-            _pre_dd = _raw_nav / _pre_hwm - 1
-            if _pre_next < len(DD_LEVELS):
-                _thr, _ = DD_LEVELS[_pre_next]
-                if _pre_dd <= -_thr:
-                    _forced = DD_LEVEL_REGIME[_pre_next]
-                    _dd_forced_regimes[_dt] = _forced
-                    _pre_active = True
-                    _pre_next  += 1
-            # Simple re-entry reset (mirrors main DD logic)
-            if _pre_active and _raw_nav / max(_nav_for_dd.iloc[0], 1e-9) > (1 - DD_LEVELS[0][0] + DD_REENTRY_PCT):
-                _pre_active = False
-                _pre_next   = 0
-                _pre_hwm    = _raw_nav
-    if _dd_forced_regimes:
-        print(f"\n  DD regime pre-pass: {len(_dd_forced_regimes)} forced-regime dates "
-              f"({sum(1 for r in _dd_forced_regimes.values() if r=='hybrid')} hybrid, "
-              f"{sum(1 for r in _dd_forced_regimes.values() if r=='mvo')} mvo)")
+    # ── DD forced regimes (populated after NAV is built, consumed by dynamic loop)
+    _dd_forced_regimes = {}   # {date: regime_string} — set in pre-pass below
 
     # ── Dynamic rebalancing strategy ─────────────────────────────────────────
     # Uses daily cached trigger variables to decide when to rebalance.
@@ -3866,6 +3833,37 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 # Hedged NAV = portfolio NAV * (1 + cumulative hedge contribution)
                 nav_dyn_hedged[dt] = nav_dynamic[dt] * (1 + cum_hedge)
             nav_dyn_hedged.name = 'nav_dyn_hedged'
+
+    # -- DD regime pre-pass -------------------------------------------------------
+    # Now that nav_dyn_hedged is available, identify dates where DD events fire
+    # and populate _dd_forced_regimes so the dynamic loop (already run) can be
+    # consulted for display; more importantly this feeds into future re-runs via
+    # the cache rebuild. The dynamic loop already consumed _dd_forced_regimes
+    # (empty on first pass) — the real fix is the corrected sh_nav in cache build.
+    _nav_for_dd = (nav_dyn_hedged if nav_dyn_hedged is not None and not nav_dyn_hedged.empty
+                   else nav_smart  if nav_smart      is not None and not nav_smart.empty
+                   else None)
+    if _nav_for_dd is not None:
+        _pre_hwm    = _nav_for_dd.iloc[0]
+        _pre_active = False
+        _pre_next   = 0
+        for _dt, _raw_nav in _nav_for_dd.items():
+            if not _pre_active:
+                _pre_hwm = max(_pre_hwm, _raw_nav)
+            _pre_dd = _raw_nav / _pre_hwm - 1
+            if _pre_next < len(DD_LEVELS):
+                _thr, _ = DD_LEVELS[_pre_next]
+                if _pre_dd <= -_thr:
+                    _dd_forced_regimes[_dt] = DD_LEVEL_REGIME[_pre_next]
+                    _pre_active = True
+                    _pre_next  += 1
+            if _pre_active and _raw_nav / max(_nav_for_dd.iloc[0], 1e-9) > (1 - DD_LEVELS[0][0] + DD_REENTRY_PCT):
+                _pre_active = False
+                _pre_next   = 0
+                _pre_hwm    = _raw_nav
+    if _dd_forced_regimes:
+        print(f"\n  DD regime pre-pass: {len(_dd_forced_regimes)} forced-regime dates "
+              f"({sum(1 for r in _dd_forced_regimes.values() if r=='mvo')} mvo)")
 
     # -- DD policy (8th strategy: Dynamic + Hedge + DD) -----------------------
     nav_dd = None
