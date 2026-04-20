@@ -2658,7 +2658,7 @@ def run_daily_cache_build(
                 ce = cands_pen[~cands_pen.index.isin(excl_d.keys())]
             else:
                 ce = cands_pen
-            if len(ce) >= top_n and (excl_d or composite_penalised):
+            if len(ce) >= top_n and (excl_d or MR_K > 0):
                 re_ = ce.sort_values(ascending=False)
                 ap_ = [t for t in re_.head(top_n).index if t in pxs_cols]
                 n_  = len(ap_)
@@ -2777,7 +2777,8 @@ def _run_excl_only_cache_build(
             _mr_n = int(MR_CAP * len(cands)) if MR_CAP > 0 else 0
             excl_d = _load_momentum_exclusions(dt, top_n=_mr_n) if _mr_n > 0 else {}
             ce = cands[~cands.index.isin(excl_d.keys())] if excl_d else cands
-            if len(ce) >= top_n and excl_d:
+            # Rebuild if there are hard exclusions OR if MR_K > 0 (penalised composite differs)
+            if len(ce) >= top_n and (excl_d or MR_K > 0):
                 re_ = ce.sort_values(ascending=False)
                 ap_ = [t for t in re_.head(top_n).index if t in pxs_cols]
                 n_  = len(ap_)
