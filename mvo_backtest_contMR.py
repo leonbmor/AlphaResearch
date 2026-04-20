@@ -2457,7 +2457,7 @@ def run_daily_cache_build(
     # -- [1/3] Composite scores ------------------------------------------------
     print("\n  [1/3] Building composite scores...")
     dates_idx = pd.DatetimeIndex(to_compute)
-    _mr_s_cache = _load_mr_scores_by_date() if MR_K > 0 else None
+    # Standard composite — always penalty-free (feeds strategies 1-8)
     with _SuppressOutput():
         composite_by_date, _ = _cb_build_composite_scores(
             universe          = get_universe(Pxs_df, sectors_s, ext_st),
@@ -2470,9 +2470,30 @@ def run_daily_cache_build(
             model_version     = model_version,
             exclude_factors   = ['OU'],
             weights_by_date   = weights_by_date,
-            mr_scores_by_date = _mr_s_cache,
+            mr_scores_by_date = None,   # never penalise standard portfolios
         )
     print(f"  Composite scores: {len(composite_by_date)} dates")
+    # Penalised composite — only built when MR_K > 0, feeds excl portfolios only
+    _mr_s_cache = None
+    composite_penalised = {}
+    if MR_K > 0:
+        print(f"  Building penalised composite (MR_K={MR_K}) for excl portfolios...")
+        _mr_s_cache = _load_mr_scores_by_date()
+        with _SuppressOutput():
+            composite_penalised, _ = _cb_build_composite_scores(
+                universe          = get_universe(Pxs_df, sectors_s, ext_st),
+                calc_dates        = dates_idx,
+                Pxs_df            = Pxs_df,
+                sectors_s         = sectors_s,
+                weights_by_year   = weights_by_year,
+                regime_s          = regime_s,
+                volumeTrd_df      = volumeTrd_df,
+                model_version     = model_version,
+                exclude_factors   = ['OU'],
+                weights_by_date   = weights_by_date,
+                mr_scores_by_date = _mr_s_cache,
+            )
+        print(f"  Penalised composite: {len(composite_penalised)} dates")
 
     # -- [2/3] X snapshots ----------------------------------------------------
     print("  [2/3] Loading X snapshots from cache...")
@@ -2503,10 +2524,13 @@ def run_daily_cache_build(
         if dt not in composite_by_date:
             continue
 
-        comp_scores = composite_by_date[dt]
+        comp_scores = composite_by_date[dt]          # clean — feeds strategies 1-8
         cands       = comp_scores.dropna()
         cands       = cands.loc[[t for t in cands.index if t in pxs_cols]]
         n_pf        = max(n_cands, int(np.ceil(len(cands) * prefilt_pct)))
+
+        # Penalised composite for excl portfolios (strategy 9)
+        comp_scores_pen = composite_penalised.get(dt, comp_scores) if composite_penalised else comp_scores
         cands       = cands.nlargest(min(n_pf, len(cands)))
 
         if len(cands) < top_n:
@@ -2626,11 +2650,15 @@ def run_daily_cache_build(
         try:
             _mr_n = int(MR_CAP * len(cands)) if MR_CAP > 0 else 0
             excl_d = _load_momentum_exclusions(dt, top_n=_mr_n) if _mr_n > 0 else {}
+            # Use penalised composite for excl candidate ranking
+            cands_pen = comp_scores_pen.dropna()
+            cands_pen = cands_pen.loc[[t for t in cands_pen.index if t in pxs_cols]]
+            cands_pen = cands_pen.nlargest(min(max(n_cands, int(np.ceil(len(cands_pen) * prefilt_pct))), len(cands_pen)))
             if excl_d:
-                ce = cands[~cands.index.isin(excl_d.keys())]
+                ce = cands_pen[~cands_pen.index.isin(excl_d.keys())]
             else:
-                ce = cands
-            if len(ce) >= top_n and excl_d:
+                ce = cands_pen
+            if len(ce) >= top_n and (excl_d or composite_penalised):
                 re_ = ce.sort_values(ascending=False)
                 ap_ = [t for t in re_.head(top_n).index if t in pxs_cols]
                 n_  = len(ap_)
@@ -2645,7 +2673,7 @@ def run_daily_cache_build(
                     with _SuppressOutput():
                         w_me,_ = _mb_solve_mvo(
                             dt=dt, candidates=ce.index.tolist()[:n_cands],
-                            composite_scores=comp_scores, Pxs_df=Pxs_df,
+                            composite_scores=comp_scores_pen, Pxs_df=Pxs_df,
                             sectors_s=sectors_s, volumeTrd_df=volumeTrd_df,
                             model_version=model_version,
                             pca_var_threshold=pca_var_threshold,
@@ -2712,9 +2740,10 @@ def _run_excl_only_cache_build(
 
     all_dates = Pxs_df.index
     ext_st    = all_dates[max(0, all_dates.searchsorted(MB_START_DATE) - MOM_LONG_BUFFER)]
+    # Excl-only always needs the penalised composite (that's the whole point)
     _mr_s_eo = _load_mr_scores_by_date() if MR_K > 0 else None
     with _SuppressOutput():
-        composite_by_date, _ = _cb_build_composite_scores(
+        composite_penalised_eo, _ = _cb_build_composite_scores(
             universe=get_universe(Pxs_df, sectors_s, ext_st),
             calc_dates=pd.DatetimeIndex(to_build), Pxs_df=Pxs_df,
             sectors_s=sectors_s, weights_by_year=weights_by_year,
@@ -2736,7 +2765,7 @@ def _run_excl_only_cache_build(
         w_h = std.get('hybrid',pd.Series(dtype=float))
         if w_a.empty: continue
         try:
-            cs = composite_by_date.get(dt, pd.Series(dtype=float))
+            cs = composite_penalised_eo.get(dt, pd.Series(dtype=float))
             if cs.empty: raise ValueError("no scores")
             cands = cs.reindex([t for t in cs.index if t in pxs_cols]).dropna().sort_values(ascending=False)
             if len(cands) < top_n: raise ValueError("insufficient candidates")
@@ -2935,12 +2964,8 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
 
     # -- [1/4] Composite alpha scores -----------------------------------------
     print("\n[1/4] Building composite alpha scores...")
-    # Load MR penalty scores if MR_K > 0
+    # Standard composite — always penalty-free (feeds strategies 1-8)
     _mr_scores_by_date = None
-    if MR_K > 0:
-        print(f"  MR_K={MR_K} — loading MR penalty scores...")
-        _mr_scores_by_date = _load_mr_scores_by_date()
-        print(f"  MR penalty scores: {len(_mr_scores_by_date)} dates with score > 0")
     composite_by_date, _ = _cb_build_composite_scores(
         universe          = universe,
         calc_dates        = calc_dates_idx,
@@ -2952,8 +2977,27 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         model_version     = MB_MODEL_VER,
         exclude_factors   = ['OU'],
         weights_by_date   = weights_by_date,
-        mr_scores_by_date = _mr_scores_by_date,
+        mr_scores_by_date = None,   # never penalise standard portfolios
     )
+    # Penalised composite for strategy 9 only
+    _composite_penalised = {}
+    if MR_K > 0:
+        print(f"  MR_K={MR_K} — building penalised composite for strategy 9...")
+        _mr_scores_by_date = _load_mr_scores_by_date()
+        print(f"  MR penalty scores: {len(_mr_scores_by_date)} dates with score > 0")
+        _composite_penalised, _ = _cb_build_composite_scores(
+            universe          = universe,
+            calc_dates        = calc_dates_idx,
+            Pxs_df            = Pxs_df,
+            sectors_s         = sectors_s,
+            weights_by_year   = weights_by_year,
+            regime_s          = regime_s,
+            volumeTrd_df      = volumeTrd_df,
+            model_version     = MB_MODEL_VER,
+            exclude_factors   = ['OU'],
+            weights_by_date   = weights_by_date,
+            mr_scores_by_date = _mr_scores_by_date,
+        )
 
     # -- [2/4] X snapshots (cached) --------------------------------------------
     print("\n[2/4] Building X snapshots (monthly, cached)...")
@@ -4587,7 +4631,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         print(f"  {label} today: {top.index.tolist()}")
         return pd.concat([port_df, today_row])
 
-    # Composite scores for today
+    # Composite scores for today — always clean (strategy display uses unpenalised)
     if today not in composite_by_date:
         today_comp, _ = _cb_build_composite_scores(
             universe=universe, calc_dates=pd.DatetimeIndex([today]),
@@ -4595,7 +4639,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             weights_by_year=weights_by_year, regime_s=regime_s,
             volumeTrd_df=volumeTrd_df, model_version=MB_MODEL_VER,
             exclude_factors=['OU'], weights_by_date=weights_by_date,
-            mr_scores_by_date=_mr_scores_by_date,
+            mr_scores_by_date=None,
         )
     else:
         today_comp = {today: composite_by_date[today]}
