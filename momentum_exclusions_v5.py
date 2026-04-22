@@ -875,7 +875,7 @@ def run_daily_exclusions_update(Pxs_df, ou_scores_df=None, force_rebuild=False,
     # Show score history for focus_list tickers
     if focus_list:
         print(f"\n  {'='*68}")
-        print(f"  FOCUS LIST — MR score history (last 50 dates)")
+        print(f"  FOCUS LIST — MR score history (last 50 dates with any score > 0)")
         print(f"  {'='*68}")
         try:
             with ENGINE.connect() as conn:
@@ -885,20 +885,27 @@ def run_daily_exclusions_update(Pxs_df, ou_scores_df=None, force_rebuild=False,
                     FROM {EXCLUSIONS_TBL}
                     WHERE ticker = ANY(:tickers)
                     AND score > 0
-                    ORDER BY ticker, date DESC
+                    ORDER BY date DESC
                 """), conn, params={'tickers': tickers_upper})
-            df_focus['date'] = pd.to_datetime(df_focus['date'])
-
-            for tkr in tickers_upper:
-                tkr_df = df_focus[df_focus['ticker'] == tkr].head(50)
-                if tkr_df.empty:
-                    print(f"\n  {tkr}: no MR scores recorded (never exceeded threshold)")
-                    continue
-                print(f"\n  {tkr}  ({len(tkr_df)} dates with score > 0, showing last 50)")
-                print(f"  {'Date':<14}  {'Score':>8}")
-                print(f"  {'─'*26}")
-                for _, row in tkr_df.iterrows():
-                    print(f"  {str(row['date'].date()):<14}  {row['score']:>8.4f}")
+            if df_focus.empty:
+                print("  No MR scores recorded for any ticker in focus list")
+            else:
+                df_focus['date'] = pd.to_datetime(df_focus['date'])
+                # Pivot: dates on index, tickers on columns
+                pivot = (df_focus
+                         .pivot_table(index='date', columns='ticker',
+                                      values='score', aggfunc='last')
+                         .reindex(columns=tickers_upper)  # preserve input order
+                         .sort_index(ascending=False)
+                         .head(50))
+                pivot = pivot.fillna(0.0)
+                # Format for display
+                pivot.index = pivot.index.strftime('%Y-%m-%d')
+                pivot.index.name = 'Date'
+                with pd.option_context('display.float_format', '{:.4f}'.format,
+                                       'display.max_columns', None,
+                                       'display.width', 120):
+                    print(pivot.to_string())
         except Exception as e:
             print(f"  WARNING: focus_list query failed: {e}")
 
