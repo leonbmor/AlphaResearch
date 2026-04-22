@@ -37,9 +37,12 @@ with ENGINE.connect() as conn:
 
 print(f"  Total rows       : {r[0]:,}")
 print(f"  Distinct dates   : {r[1]:,}")
-print(f"  Score > 0        : {r[2]:,}  ({r[2]/max(r[0],1)*100:.1f}%)")
-print(f"  Date range       : {r[3]}  →  {r[4]}")
-print(f"  Score range      : min={r[5]:.4f}  max={r[6]:.4f}  avg={r[7]:.4f}")
+if r[0] and r[0] > 0:
+    print(f"  Score > 0        : {r[2]:,}  ({r[2]/max(r[0],1)*100:.1f}%)")
+    print(f"  Date range       : {r[3]}  →  {r[4]}")
+    print(f"  Score range      : min={r[5]:.4f}  max={r[6]:.4f}  avg={r[7]:.4f}")
+else:
+    print(f"  Table is empty — run run_daily_exclusions_update(Pxs_df, force_rebuild=True)")
 
 # ── 2. Exclusions per date (recent history) ───────────────────────────────────
 print(f"\n{'─'*68}")
@@ -124,11 +127,14 @@ with ENGINE.connect() as conn:
     """), conn)['score'].values
 
 pcts = [50, 75, 90, 95, 99, 99.9]
-print(f"  N={len(scores):,}  mean={scores.mean():.4f}  std={scores.std():.4f}")
-print(f"  {'Percentile':<14}  {'Score':>8}")
-print(f"  {'─'*26}")
-for p in pcts:
-    print(f"  p{p:<13.1f}  {np.percentile(scores, p):>8.4f}")
+if len(scores) == 0:
+    print("  No scores found — table is empty")
+else:
+    print(f"  N={len(scores):,}  mean={scores.mean():.4f}  std={scores.std():.4f}")
+    print(f"  {'Percentile':<14}  {'Score':>8}")
+    print(f"  {'─'*26}")
+    for p in pcts:
+        print(f"  p{p:<13.1f}  {np.percentile(scores, p):>8.4f}")
 
 # ── 6. Score distribution by year ────────────────────────────────────────────
 print(f"\n{'─'*68}")
@@ -141,13 +147,10 @@ with ENGINE.connect() as conn:
                COUNT(*)                         AS n_rows,
                COUNT(DISTINCT date)             AS n_dates,
                ROUND(AVG(score)::numeric, 4)    AS avg_score,
-               ROUND(MAX(score)::numeric, 4)    AS max_score,
-               ROUND(AVG(COUNT(*)) OVER
-                   (PARTITION BY EXTRACT(YEAR FROM date))::numeric, 1)
-                                                AS avg_per_date
+               ROUND(MAX(score)::numeric, 4)    AS max_score
         FROM {EXCLUSIONS_TBL}
         WHERE score > 0
-        GROUP BY year
+        GROUP BY EXTRACT(YEAR FROM date)::int
         ORDER BY year
     """), conn)
 

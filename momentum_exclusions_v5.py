@@ -325,7 +325,7 @@ def build_ou_scores_df(model_version='v2'):
     print(f"  Loading OU scores from {tbl}...")
     with ENGINE.connect() as conn:
         df = pd.read_sql(text(
-            f"SELECT date, ticker, ou_score FROM {tbl} ORDER BY date"
+            f"SELECT date, ticker, ou_score FROM {tbl} ORDER BY date, ticker"
         ), conn)
     if df.empty:
         warnings.warn(f"  No OU scores found in {tbl}")
@@ -757,8 +757,20 @@ def load_pct_df():
         if df.empty:
             return pd.DataFrame()
         df['date'] = pd.to_datetime(df['date'])
-        return df.set_index('date')
-    except Exception:
+        df = df.set_index('date')
+        # Restore original column casing: e.g. p95_1m → p95_1M, mean_1y_1m → mean_1Y_1M
+        def _restore_case(col):
+            # window suffixes: 1m→1M, 2m→2M, 3m→3M
+            for w in ('1m', '2m', '3m'):
+                if col.endswith(f'_{w}'):
+                    col = col[:-len(w)] + w.upper()
+            # year indicators: 1y→1Y, 5y→5Y
+            col = col.replace('_1y_', '_1Y_').replace('_5y_', '_5Y_')
+            return col
+        df.columns = [_restore_case(c) for c in df.columns]
+        return df
+    except Exception as e:
+        print(f"  WARNING: load_pct_df failed: {e}")
         return pd.DataFrame()
 
 
@@ -808,15 +820,20 @@ def run_pct_analysis_incremental(Pxs_df, universe, **kwargs):
 # No kernel state required beyond Pxs_df and ou_scores_df.
 # ==============================================================================
 
-def run_daily_exclusions_update(Pxs_df, ou_scores_df=None):
+def run_daily_exclusions_update(Pxs_df, ou_scores_df=None, force_rebuild=False,
+                                focus_list=None):
     """
     Self-contained daily update. Loads pct_df from DB cache, computes
     exclusions for any unprocessed dates only. Typically just today.
 
     Parameters
     ----------
-    Pxs_df       : price panel (needs today's prices)
-    ou_scores_df : optional — loaded from DB if not provided
+    Pxs_df         : price panel (needs today's prices)
+    ou_scores_df   : optional — loaded from DB if not provided
+    force_rebuild  : if True, wipes all cached exclusions and recomputes
+                     all dates from scratch using cached pct_df and OU scores
+    focus_list     : optional list of tickers — prints last 50 dates of MR
+                     scores for each, useful for tracking patterns
     """
     # Load pct_df from cache — no recomputation
     pct_df = load_pct_df()
@@ -828,8 +845,62 @@ def run_daily_exclusions_update(Pxs_df, ou_scores_df=None):
     if ou_scores_df is None:
         ou_scores_df = build_ou_scores_df(model_version='v2')
 
-    # Run exclusions — skips all processed dates, computes only new ones
-    run_exclusions(Pxs_df, pct_df, ou_scores_df, incremental=True)
+    # Warn if OU coverage is low vs Pxs_df universe
+    non_equity = {'USGG10YR', 'SPX', 'SPY', 'QQQ', 'VIX'}
+    _universe_size = len([c for c in Pxs_df.columns if c not in non_equity])
+    _ou_coverage   = len(ou_scores_df.columns) if not ou_scores_df.empty else 0
+    if _ou_coverage < _universe_size * 0.9:
+        print(f"  WARNING: OU scores only cover {_ou_coverage} tickers vs "
+              f"{_universe_size} in universe ({_ou_coverage/_universe_size*100:.0f}%). "
+              f"Stocks without OU scores are never flagged. "
+              f"Consider passing a fuller ou_scores_df explicitly.")
+
+    # Run exclusions
+    run_exclusions(Pxs_df, pct_df, ou_scores_df,
+                   incremental=not force_rebuild,
+                   force_rebuild=force_rebuild)
+
+    # Show top-50 MR scores for the last date
+    last_dt = Pxs_df.index[-1]
+    top50   = load_exclusions(last_dt, top_n=50)
+    if top50:
+        print(f"\n  Top MR scores — {last_dt.date()}  ({len(top50)} stocks with score > 0 shown, capped at 50)")
+        print(f"  {'Ticker':<10}  {'Score':>8}")
+        print(f"  {'─'*22}")
+        for tkr, score in top50.items():
+            print(f"  {tkr:<10}  {score:>8.4f}")
+    else:
+        print(f"\n  No exclusions scored > 0 for {last_dt.date()}")
+
+    # Show score history for focus_list tickers
+    if focus_list:
+        print(f"\n  {'='*68}")
+        print(f"  FOCUS LIST — MR score history (last 50 dates)")
+        print(f"  {'='*68}")
+        try:
+            with ENGINE.connect() as conn:
+                tickers_upper = [t.upper() for t in focus_list]
+                df_focus = pd.read_sql(text(f"""
+                    SELECT date, ticker, score
+                    FROM {EXCLUSIONS_TBL}
+                    WHERE ticker = ANY(:tickers)
+                    AND score > 0
+                    ORDER BY ticker, date DESC
+                """), conn, params={'tickers': tickers_upper})
+            df_focus['date'] = pd.to_datetime(df_focus['date'])
+
+            for tkr in tickers_upper:
+                tkr_df = df_focus[df_focus['ticker'] == tkr].head(50)
+                if tkr_df.empty:
+                    print(f"\n  {tkr}: no MR scores recorded (never exceeded threshold)")
+                    continue
+                print(f"\n  {tkr}  ({len(tkr_df)} dates with score > 0, showing last 50)")
+                print(f"  {'Date':<14}  {'Score':>8}")
+                print(f"  {'─'*26}")
+                for _, row in tkr_df.iterrows():
+                    print(f"  {str(row['date'].date()):<14}  {row['score']:>8.4f}")
+        except Exception as e:
+            print(f"  WARNING: focus_list query failed: {e}")
 
 
 # Execute daily update
