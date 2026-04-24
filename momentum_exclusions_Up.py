@@ -1,3 +1,9 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
 """
 momentum_exclusions.py
 ======================
@@ -917,6 +923,3 @@ def run_daily_exclusions_update(Pxs_df, ou_scores_df=None, force_rebuild=False,
         except Exception as e:
             print(f"  WARNING: focus_list query failed: {e}")
 
-
-# Execute daily update
-run_daily_exclusions_update(Pxs_df)

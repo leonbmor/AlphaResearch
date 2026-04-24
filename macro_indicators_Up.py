@@ -1,3 +1,17 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+# DAILY HEDGING SIGNALS - UPDATE EVERY DAY
+
 """
 macro_indicators.py
 ===================
@@ -1361,8 +1375,7 @@ def run_macro_hedge_cached(Pxs_df:        pd.DataFrame,
         if missing_sig:
             # Corr-adjusted MOVE for this instrument
             ref_ret_inst = Pxs_df[inst].loc[pd.Timestamp(hard_start):].pct_change()
-            move_chg     = raw_move_diff.diff() if hasattr(raw_move_diff, 'diff') \
-                           else pd.Series(raw_move_diff).diff()
+            move_chg     = raw_move_diff.diff() if hasattr(raw_move_diff, 'diff')                            else pd.Series(raw_move_diff).diff()
             # Use raw_move_base diff for correlation
             raw_base_chg = raw_move_base.diff()
             common_idx   = raw_base_chg.dropna().index.intersection(
@@ -1464,14 +1477,10 @@ def run_macro_hedge_cached(Pxs_df:        pd.DataFrame,
         # Summary line
         n_on  = signal_df_full['signal'].sum()
         n_tot = len(signal_df_full)
-        eff_l = signal_df_full['effectiveness'].dropna().iloc[-1] \
-                if signal_df_full['effectiveness'].notna().any() else np.nan
-        sh_r  = signal_df_full['sharpe_raw'].dropna().iloc[-1] \
-                if signal_df_full['sharpe_raw'].notna().any() else np.nan
-        sh_h  = signal_df_full['sharpe_hedged'].dropna().iloc[-1] \
-                if signal_df_full['sharpe_hedged'].notna().any() else np.nan
-        nav_l = signal_df_full['nav_ratio'].dropna().iloc[-1] \
-                if signal_df_full['nav_ratio'].notna().any() else np.nan
+        eff_l = signal_df_full['effectiveness'].dropna().iloc[-1]                 if signal_df_full['effectiveness'].notna().any() else np.nan
+        sh_r  = signal_df_full['sharpe_raw'].dropna().iloc[-1]                 if signal_df_full['sharpe_raw'].notna().any() else np.nan
+        sh_h  = signal_df_full['sharpe_hedged'].dropna().iloc[-1]                 if signal_df_full['sharpe_hedged'].notna().any() else np.nan
+        nav_l = signal_df_full['nav_ratio'].dropna().iloc[-1]                 if signal_df_full['nav_ratio'].notna().any() else np.nan
         print(f"  ON={n_on} ({n_on/n_tot*100:.1f}%)  nav={nav_l:.3f}  "
               f"sharpe={sh_r:.2f}->{sh_h:.2f}  eff={eff_l:.3f}")
 
@@ -1500,12 +1509,74 @@ def run_macro_hedge_cached(Pxs_df:        pd.DataFrame,
         print(f"  {inst:<10}  {n/tot*100:>9.1f}%  {nav:>10.3f}  "
               f"{shr:>11.2f}  {shh:>11.2f}  {shi:>11.3f}  {eff:>14.3f}")
 
+    _print_signal_history(results)
+    _print_last_day_detail(results, Pxs_df)
+
     return {
         'qbd_s':       qbd_s,
         'raw_move_s':  raw_move_diff,
         'results':     results,
         'params_hash': params_hash,
     }
+
+
+# Post-run display helpers (called automatically by run_macro_hedge_cached)
+
+def _print_signal_history(results: dict, n_days: int = 50) -> None:
+    """Print binary hedge signal matrix: last n_days × instruments."""
+    if not results:
+        return
+    frames = {}
+    for inst, res in results.items():
+        s = res['signal_df']['signal']
+        frames[inst] = s
+    sig_df = pd.DataFrame(frames).sort_index().tail(n_days)
+    sig_df.index = sig_df.index.strftime('%Y-%m-%d')
+    sig_df.index.name = 'Date'
+
+    print(f"\n{'='*72}")
+    print(f"  HEDGE SIGNAL HISTORY — last {n_days} days  (1=ON  0=OFF)")
+    print(f"{'='*72}")
+    # Format: 1 shown as '█', 0 as '·' for readability
+    display = sig_df.applymap(lambda x: '█' if x == 1 else '·')
+    with pd.option_context('display.max_columns', None, 'display.width', 120):
+        print(display.to_string())
+
+
+def _print_last_day_detail(results: dict, Pxs_df: pd.DataFrame) -> None:
+    """Print MOVE/QBD values vs thresholds for each instrument on last date."""
+    if not results:
+        return
+    last_dt = Pxs_df.index[-1]
+
+    print(f"\n{'='*72}")
+    print(f"  LAST DAY DETAIL — {last_dt.date()}")
+    print(f"{'='*72}")
+    print(f"  {'Instrument':<12}  {'Signal':>7}  "
+          f"{'MOVE val':>10}  {'MOVE_T':>8}  {'MOVE?':>6}  "
+          f"{'QBD val':>9}  {'QBD_T':>7}  {'QBD?':>5}")
+    print(f"  {'─'*76}")
+
+    for inst, res in results.items():
+        df = res['signal_df']
+        # Get last available row at or before last_dt
+        past = df[df.index <= last_dt]
+        if past.empty:
+            continue
+        row = past.iloc[-1]
+        sig    = int(row['signal'])
+        mv     = row['move_val']
+        mv_t   = row['move_t']
+        mv_f   = int(row['move_signal'])
+        qv     = row['qbd_val']
+        qv_t   = row['qbd_t']
+        qv_f   = int(row['qbd_signal'])
+        sig_str = '█ ON ' if sig == 1 else '· off'
+        mv_str  = '✓' if mv_f else '✗'
+        qv_str  = '✓' if qv_f else '✗'
+        print(f"  {inst:<12}  {sig_str:>7}  "
+              f"{mv:>10.4f}  {mv_t:>8.4f}  {mv_str:>6}  "
+              f"{qv:>9.4f}  {qv_t:>7.4f}  {qv_str:>5}")
 
 
 # ================================================================================
@@ -1590,3 +1661,4 @@ def plot_effectiveness(multi_result: dict,
         s = eff_dict[inst]
         print(f"  {inst:<10}  {s.iloc[-1]:>10.3f}  {s.mean():>10.3f}  "
               f"{s.min():>10.3f}  {s.max():>10.3f}")
+
