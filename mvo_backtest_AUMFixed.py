@@ -4348,6 +4348,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 _s9_costs = _cost_by_date.get('dynamic', {})
             else:
                 _w9_prev = pd.Series(dtype=float)
+                _s9_running_nav = 1.0  # track NAV for correct AUM at each rebal
                 for _rec9 in _dyn_rebal_log:
                     _dt9 = _rec9['dt']; _reg9 = _rec9['regime']
                     _p9  = _port_cache.get(_dt9, {})
@@ -4357,11 +4358,45 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                     else:
                         _w9 = _p9.get(f'{_reg9}_excl', _p9.get(_reg9, pd.Series(dtype=float)))
                     if _w9.empty: _w9 = _rec9['w'].copy()
+
+                    # Option C: apply ADVP filter at consumption time with correct AUM
+                    if volumeRaw_df is not None and AUM * _s9_running_nav > 0 and not _w9.empty:
+                        _s9_aum = AUM * _s9_running_nav
+                        _past_s9 = [d for d in Pxs_df.index if d <= _dt9][-ADV_WINDOW:]
+                        _w9_filtered = {}
+                        for _tkr, _wt in _w9.items():
+                            if _tkr not in Pxs_df.columns or _tkr not in volumeRaw_df.columns:
+                                _w9_filtered[_tkr] = _wt; continue
+                            _px_s  = Pxs_df.loc[_past_s9, _tkr].dropna()
+                            _vol_s = volumeRaw_df.loc[_past_s9, _tkr].dropna()
+                            _com   = _px_s.index.intersection(_vol_s.index)
+                            if len(_com) < 3:
+                                _w9_filtered[_tkr] = _wt; continue
+                            _dv = (_px_s.reindex(_com) * _vol_s.reindex(_com).replace({0: np.nan})).median()
+                            if (_dv * advp_cap) / _s9_aum >= min_weight:
+                                _w9_filtered[_tkr] = _wt
+                        if _w9_filtered:
+                            _w9 = pd.Series(_w9_filtered)
+                            _w9 = _w9 / _w9.sum()
+
                     if not _w9_prev.empty:
                         _at9 = list(set(_w9.index)|set(_w9_prev.index))
                         _to9 = (_w9.reindex(_at9).fillna(0)-_w9_prev.reindex(_at9).fillna(0)).abs().sum()/2
                         _s9_costs[_dt9] = _to9 * TRADING_COST_BPS / 10000
                     _s9_wbd[_dt9] = _w9.copy(); _w9_prev = _w9.copy()
+
+                    # Update running NAV to next rebalance date
+                    _next_recs = [r for r in _dyn_rebal_log if r['dt'] > _dt9]
+                    _next_dt9  = _next_recs[0]['dt'] if _next_recs else Pxs_df.index[-1]
+                    _nav_dates = [d for d in Pxs_df.index if _dt9 <= d <= _next_dt9]
+                    if len(_nav_dates) >= 2:
+                        _tks9 = [t for t in _w9.index if t in Pxs_df.columns]
+                        if _tks9:
+                            _px_st = Pxs_df.loc[_nav_dates[0],  _tks9]
+                            _px_en = Pxs_df.loc[_nav_dates[-1], _tks9]
+                            _per9  = (_w9.reindex(_tks9).fillna(0) *
+                                      (_px_en / _px_st - 1).fillna(0)).sum()
+                            _s9_running_nav *= (1 + _per9)
                 # Fill forward (same dates as strategy 8)
                 _lw9 = pd.Series(dtype=float)
                 for _dt9f in sorted(dyn_weights_by_date.keys()):
@@ -4611,10 +4646,9 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         print(f"  {lbl:<30} {cagr*100:>7.1f}% {vol*100:>7.1f}% "
               f"{sharpe:>8.2f} {mdd*100:>7.1f}% {cagr_dd:>8.2f}x")
 
-    _aum_nav = (nav_dd_excl if nav_dd_excl is not None and not nav_dd_excl.empty else
-                nav_dd      if nav_dd      is not None and not nav_dd.empty      else
-                nav_dyn_hedged if nav_dyn_hedged is not None and not nav_dyn_hedged.empty else
-                nav_dynamic if nav_dynamic  is not None and not nav_dynamic.empty else
+    _aum_nav = (nav_dd         if nav_dd         is not None and not nav_dd.empty         else
+                nav_dyn_hedged if nav_dyn_hedged  is not None and not nav_dyn_hedged.empty else
+                nav_dynamic    if nav_dynamic     is not None and not nav_dynamic.empty    else
                 nav_smart)
 
     print(f"\n  Yearly returns  (starting AUM: ${AUM/1e6:.1f}M)")
