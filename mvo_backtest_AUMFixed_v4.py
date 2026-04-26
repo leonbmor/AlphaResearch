@@ -4313,6 +4313,9 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 _w_dyn, _cands_dyn, _dt_dyn, Pxs_df, volumeRaw_df,
                 _dyn_aum, advp_cap, min_weight, max_weight, top_n, conc_factor)
             dyn_weights_by_date[_dt_dyn] = _w_filtered
+            # Keep smart_hybrid_weights_by_date in sync
+            if _dt_dyn in smart_hybrid_weights_by_date:
+                smart_hybrid_weights_by_date[_dt_dyn] = _w_filtered
         # Recompute nav_dynamic with corrected weights
         nav_dynamic = (_mb_run_nav(dyn_weights_by_date, sorted(dyn_weights_by_date.keys()),
                                    Pxs_df, cost_by_date=_cost_by_date["dynamic"])
@@ -5392,7 +5395,9 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             else:
                 w_dyn_old = w_prev
         else:
-            # No rebalance today — build hypothetical using same logic as actual dynamic loop
+            # No rebalance today — hypothetical new = same as what backtest holds today
+            # (forward-filled from last rebalance, already ADVP-filtered)
+            w_dyn_new = w_dyn_deployed
             last_recs = [r for r in _dyn_rebal_log if r['dt'] <= today_ts]
             if last_recs:
                 last_dt = last_recs[-1]['dt']
@@ -5406,36 +5411,6 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                     w_dyn_old = w_last
             else:
                 w_dyn_old = w_dyn_deployed
-
-            # Hypothetical new = same cached portfolio + ADVP filter as actual dynamic loop
-            try:
-                _today_aum_hyp = AUM * float(nav_dynamic.iloc[-1]) if (
-                    nav_dynamic is not None and not nav_dynamic.empty) else AUM
-                with ENGINE.connect() as _conn_hyp:
-                    _rows_hyp = _conn_hyp.execute(text(f"""
-                        SELECT strategy, weights_json FROM {MB_DAILY_PORT_TBL}
-                        WHERE date=:dt AND model_version=:mv AND params_hash=:ph
-                    """), {'dt': today_ts.strftime('%Y-%m-%d'),
-                           'mv': MB_MODEL_VER, 'ph': params_hash}).fetchall()
-                _p_today     = {r[0]: pd.Series(json.loads(r[1])) for r in _rows_hyp}
-                _cands_today = _p_today.get('candidates', pd.Series(dtype=float))
-                # Use same regime as actual dynamic rebalance (regime_s, not DD-based)
-                _reg_dyn_today = 'alpha'
-                if today_ts in regime_s.index:
-                    _rv = regime_s.reindex([today_ts]).iloc[0]
-                    _reg_dyn_today = ('mvo'    if _rv >= 1.0 else
-                                      'hybrid' if _rv >= 0.5 else 'alpha')
-                _w_hyp_base = _p_today.get(_reg_dyn_today, pd.Series(dtype=float))
-                if _w_hyp_base.empty:
-                    _w_hyp_base = _p_today.get('alpha', pd.Series(dtype=float))
-                if volumeRaw_df is not None and not _cands_today.empty and not _w_hyp_base.empty:
-                    _w_hyp_base = _advp_filter_and_replace(
-                        _w_hyp_base, _cands_today, today_ts, Pxs_df, volumeRaw_df,
-                        _today_aum_hyp, advp_cap, min_weight, max_weight,
-                        top_n, conc_factor)
-                w_dyn_new = _w_hyp_base if not _w_hyp_base.empty else w_dyn_deployed
-            except Exception:
-                w_dyn_new = w_dyn_deployed
 
         # Strategy 9 old: last S9 rebal weights drifted to today
         _s9_rebal_dates_t = [r['dt'] for r in _dyn_rebal_log if r['dt'] <= today_ts]
