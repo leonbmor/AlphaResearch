@@ -1438,11 +1438,11 @@ def _advp_filter_and_replace(weights: pd.Series,
 
     def _is_liquid(tkr):
         if tkr not in pxs_cols or tkr not in volumeRaw_df.columns:
-            return True   # no data — assume liquid
+            return False  # no volume data — treat as illiquid (conservative)
         px_s  = Pxs_df.loc[past_dates, tkr].dropna()
         vol_s = volumeRaw_df.loc[past_dates, tkr].dropna()
         com   = px_s.index.intersection(vol_s.index)
-        if len(com) < 3: return True
+        if len(com) < 3: return False
         dv = (px_s.reindex(com) * vol_s.reindex(com).replace({0: np.nan})).median()
         return (dv * advp_cap) / current_aum >= min_weight
 
@@ -1480,14 +1480,31 @@ def _advp_filter_and_replace(weights: pd.Series,
             t: (top_a / n_top if j < n_top else bot_a / n_bot)
             for j, t in enumerate(final)
         })
-    # Apply max_weight cap iteratively
+
+    # Apply ADVP weight cap to liquid-but-constrained stocks
+    for tkr in list(w_new.index):
+        if tkr not in pxs_cols or tkr not in volumeRaw_df.columns:
+            continue  # already excluded by _is_liquid above
+        px_s  = Pxs_df.loc[past_dates, tkr].dropna()
+        vol_s = volumeRaw_df.loc[past_dates, tkr].dropna()
+        com   = px_s.index.intersection(vol_s.index)
+        if len(com) < 3:
+            continue
+        dv    = (px_s.reindex(com) * vol_s.reindex(com).replace({0: np.nan})).median()
+        cap_w = (dv * advp_cap) / current_aum
+        if cap_w < w_new[tkr] - 1e-9:
+            w_new[tkr] = max(cap_w, min_weight)
+
+    # Renormalise and apply max_weight cap iteratively
+    if w_new.sum() > 0:
+        w_new = w_new / w_new.sum()
     _eff_max = max(max_weight, 1.0 / max(n, 1))
     for _ in range(20):
         over = w_new > _eff_max + 1e-9
         if not over.any(): break
-        excess    = (w_new[over] - _eff_max).sum()
+        excess      = (w_new[over] - _eff_max).sum()
         w_new[over] = _eff_max
-        under     = ~over
+        under = ~over
         if w_new[under].sum() > 1e-12:
             w_new[under] += excess * (w_new[under] / w_new[under].sum())
     return w_new / w_new.sum() if w_new.sum() > 0 else w_new
@@ -3476,6 +3493,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 port_cache = {r[0]: pd.Series(json.loads(r[1])) for r in rows}
                 if 'alpha' in port_cache and 'mvo' in port_cache:
                     # Apply ADVP filter with replacement using correct running AUM
+                    # Use alpha NAV as proxy — best available before dynamic NAV is computed
                     _candidates_cache = port_cache.get('candidates', pd.Series(dtype=float))
                     _current_aum_c    = AUM * _running_nav
                     if volumeRaw_df is not None and not _candidates_cache.empty:
@@ -3496,9 +3514,9 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                         port_cache['alpha']  = _w_alpha_c
                         port_cache['mvo']    = _w_mvo_c
                         port_cache['hybrid'] = _w_hyb_c
-                    # alpha_weights_by_date[dt] already set above from fresh computation
-                    # alpha costs already computed correctly above — don't overwrite
-                    mvo_weights_by_date[dt]   = port_cache['mvo']
+                    # Write filtered weights back to all strategy weight dicts
+                    alpha_weights_by_date[dt]  = port_cache['alpha']
+                    mvo_weights_by_date[dt]    = port_cache['mvo']
                     w_hyb_cached = port_cache.get('hybrid', pd.Series(dtype=float))
                     hybrid_weights_by_date[dt] = w_hyb_cached
                     # Compute MVO/hybrid trading costs for cached dates
@@ -4265,6 +4283,41 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                                Pxs_df, cost_by_date=_cost_by_date["dynamic"])
                    if dyn_weights_by_date else pd.Series(dtype=float))
 
+    # Second-pass ADVP re-filter for strategies 6-8 using correct dynamic NAV
+    # The first pass used alpha NAV as proxy; now we have the actual dynamic NAV
+    if volumeRaw_df is not None and not nav_dynamic.empty:
+        for _dt_dyn in sorted(dyn_weights_by_date.keys()):
+            _w_dyn = dyn_weights_by_date[_dt_dyn]
+            if _w_dyn.empty: continue
+            # Get dynamic NAV at this rebalance date
+            _nav_at_dt = nav_dynamic[nav_dynamic.index <= _dt_dyn]
+            if _nav_at_dt.empty: continue
+            _dyn_aum = AUM * float(_nav_at_dt.iloc[-1])
+            # Get candidates for this date from cache
+            _cands_dyn = pd.Series(dtype=float)
+            if _dt_dyn in cached_port_dates:
+                try:
+                    with ENGINE.connect() as conn:
+                        _cr = conn.execute(text(f"""
+                            SELECT weights_json FROM {MB_DAILY_PORT_TBL}
+                            WHERE date=:dt AND model_version=:mv
+                            AND params_hash=:ph AND strategy='candidates'
+                        """), {'dt': _dt_dyn.strftime('%Y-%m-%d'),
+                               'mv': MB_MODEL_VER, 'ph': params_hash}).fetchone()
+                    if _cr:
+                        _cands_dyn = pd.Series(json.loads(_cr[0]))
+                except Exception:
+                    pass
+            if _cands_dyn.empty: continue
+            _w_filtered = _advp_filter_and_replace(
+                _w_dyn, _cands_dyn, _dt_dyn, Pxs_df, volumeRaw_df,
+                _dyn_aum, advp_cap, min_weight, max_weight, top_n, conc_factor)
+            dyn_weights_by_date[_dt_dyn] = _w_filtered
+        # Recompute nav_dynamic with corrected weights
+        nav_dynamic = (_mb_run_nav(dyn_weights_by_date, sorted(dyn_weights_by_date.keys()),
+                                   Pxs_df, cost_by_date=_cost_by_date["dynamic"])
+                       if dyn_weights_by_date else pd.Series(dtype=float))
+
     # Baseline trading costs -- equal weight assumed, turnover from port changes
     _prev_bl = pd.Series(dtype=float)
     for rdt in sorted(quality_factor_by_date.keys()):
@@ -4537,7 +4590,9 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 _s9_wbd   = dyn_weights_by_date        # same object — no copy needed
                 _s9_costs = _cost_by_date.get('dynamic', {})
             else:
-                _w9_prev = pd.Series(dtype=float)
+                _w9_prev        = pd.Series(dtype=float)
+                _s9_running_nav = 1.0
+                _s9_nav_log     = []   # diagnostic
                 for _rec9 in _dyn_rebal_log:
                     _dt9 = _rec9['dt']; _reg9 = _rec9['regime']
                     _p9  = _port_cache.get(_dt9, {})
@@ -4547,11 +4602,47 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                     else:
                         _w9 = _p9.get(f'{_reg9}_excl', _p9.get(_reg9, pd.Series(dtype=float)))
                     if _w9.empty: _w9 = _rec9['w'].copy()
+
+                    # Apply ADVP filter with replacement using correct running AUM
+                    _cands9 = _p9.get('candidates', pd.Series(dtype=float))
+                    _s9_aum = AUM * _s9_running_nav
+                    if volumeRaw_df is not None and not _cands9.empty and not _w9.empty:
+                        _w9_before = _w9.copy()
+                        _w9 = _advp_filter_and_replace(
+                            _w9, _cands9, _dt9, Pxs_df, volumeRaw_df,
+                            _s9_aum, advp_cap, min_weight, max_weight,
+                            top_n, conc_factor)
+                        # Log if filter changed anything
+                        _changed = set(_w9_before.index) != set(_w9.index)
+                        if _changed and _dt9.year >= 2024:
+                            _removed = set(_w9_before.index) - set(_w9.index)
+                            _added   = set(_w9.index) - set(_w9_before.index)
+                            print(f"  [S9 ADVP] {_dt9.date()}  AUM=${_s9_aum:,.0f}"
+                                  f"  removed={sorted(_removed)}  added={sorted(_added)}")
+
                     if not _w9_prev.empty:
                         _at9 = list(set(_w9.index)|set(_w9_prev.index))
                         _to9 = (_w9.reindex(_at9).fillna(0)-_w9_prev.reindex(_at9).fillna(0)).abs().sum()/2
                         _s9_costs[_dt9] = _to9 * TRADING_COST_BPS / 10000
                     _s9_wbd[_dt9] = _w9.copy(); _w9_prev = _w9.copy()
+
+                    # Update running NAV to next rebalance for ADVP AUM tracking
+                    _next9 = [r['dt'] for r in _dyn_rebal_log if r['dt'] > _dt9]
+                    _end9  = _next9[0] if _next9 else Pxs_df.index[-1]
+                    _nav9d = [d for d in Pxs_df.index if _dt9 <= d <= _end9]
+                    if len(_nav9d) >= 2:
+                        _tk9 = [t for t in _w9.index if t in Pxs_df.columns]
+                        if _tk9:
+                            _ret9 = (_w9.reindex(_tk9).fillna(0) *
+                                     (Pxs_df.loc[_nav9d[-1], _tk9] /
+                                      Pxs_df.loc[_nav9d[0],  _tk9] - 1).fillna(0)).sum()
+                            _s9_running_nav *= (1 + _ret9)
+                    _s9_nav_log.append((_dt9, _s9_running_nav, _s9_aum))
+
+                # Print NAV log for recent dates
+                print(f"\n  [S9 NAV tracking] last 5 rebalances:")
+                for _d, _n, _a in _s9_nav_log[-5:]:
+                    print(f"    {_d.date()}  nav={_n:.3f}  AUM=${_a:,.0f}")
                 # Fill forward (same dates as strategy 8)
                 _lw9 = pd.Series(dtype=float)
                 for _dt9f in sorted(dyn_weights_by_date.keys()):
@@ -4801,10 +4892,9 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         print(f"  {lbl:<30} {cagr*100:>7.1f}% {vol*100:>7.1f}% "
               f"{sharpe:>8.2f} {mdd*100:>7.1f}% {cagr_dd:>8.2f}x")
 
-    _aum_nav = (nav_dd_excl if nav_dd_excl is not None and not nav_dd_excl.empty else
-                nav_dd      if nav_dd      is not None and not nav_dd.empty      else
-                nav_dyn_hedged if nav_dyn_hedged is not None and not nav_dyn_hedged.empty else
-                nav_dynamic if nav_dynamic  is not None and not nav_dynamic.empty else
+    _aum_nav = (nav_dd         if nav_dd         is not None and not nav_dd.empty         else
+                nav_dyn_hedged if nav_dyn_hedged  is not None and not nav_dyn_hedged.empty else
+                nav_dynamic    if nav_dynamic     is not None and not nav_dynamic.empty    else
                 nav_smart)
 
     print(f"\n  Yearly returns  (starting AUM: ${AUM/1e6:.1f}M)")
@@ -4812,7 +4902,6 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
           f"{'Smart':>9} {'Dynamic':>9} {'Dyn+Hdg':>9} {'DD Pol':>8} {'Excl':>8} {'AUM($M)':>9}")
     print(f"  {'-'*116}")
 
-    _cum_nav = 1.0
     all_years = sorted(set(nav_baseline.index.year))
     for yr in all_years:
         def yr_ret(nav_s):
@@ -4820,9 +4909,10 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
             if len(yr_nav) < 2: return np.nan
             return (yr_nav.iloc[-1] / yr_nav.iloc[0] - 1) * 100
         if _aum_nav is not None and not _aum_nav.empty:
-            yn = _aum_nav[_aum_nav.index.year == yr]
-            if len(yn) >= 2: _cum_nav *= (yn.iloc[-1] / yn.iloc[0])
-        closing_aum = AUM * _cum_nav
+            _nav_to_yr = _aum_nav[_aum_nav.index.year <= yr]
+            closing_aum = AUM * float(_nav_to_yr.iloc[-1]) if not _nav_to_yr.empty else AUM
+        else:
+            closing_aum = AUM
         excl_str = (f"{yr_ret(nav_dd_excl):>+7.2f}%"
                     if nav_dd_excl is not None and not nav_dd_excl.empty else f"{'n/a':>8}")
         print(f"  {yr:<6} {yr_ret(nav_baseline):>+9.2f}%  "
@@ -5101,11 +5191,22 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                   f"  Hedge acct bal : 0.00% (clean)")
 
     # -- Hypothetical Dyn+Hedge+DD+Excl rebalance as of today ----------------
-    print("\n  " + "=" * 72)
-    print(f"  HYPOTHETICAL DYN+HEDGE+DD+EXCL REBALANCE AS OF {today_ts.date()}")
-    print("  " + "=" * 72)
+    # Only show if today is NOT already a rebalance day for strategy 9
+    _today_is_s9_rebal = any(r['dt'] == today_ts for r in _dyn_rebal_log)
     w_smart_t = None   # will hold today's excl-filtered portfolio
-    try:
+    if _today_is_s9_rebal:
+        print("\n  " + "=" * 72)
+        print(f"  NOTE: Today ({today_ts.date()}) IS a strategy 9 rebalance day.")
+        print(f"  The current live portfolio above already reflects today's rebalance.")
+        print("  " + "=" * 72)
+        # Use the actual S9 rebalance portfolio as w_smart_t for trade summary
+        w_smart_t = _s9_wbd.get(today_ts, pd.Series(dtype=float))
+    else:
+        print("\n  " + "=" * 72)
+        print(f"  HYPOTHETICAL DYN+HEDGE+DD+EXCL REBALANCE AS OF {today_ts.date()}")
+        print("  " + "=" * 72)
+    if not _today_is_s9_rebal:
+      try:
         if today_ts in composite_by_date:
             comp_today = composite_by_date[today_ts]
         elif today_comp:
@@ -5252,7 +5353,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                               f"{v:>7.1f}%  {z:>+8.3f}  {sec:<28}  {src}{advp_flag_t}")
         else:
             print("  No composite scores available for today.")
-    except Exception as e:
+      except Exception as e:
         print(f"  Could not compute hypothetical smart hybrid rebalance: {e}")
 
     # -- Unified trade summary table -------------------------------------------
@@ -5329,7 +5430,11 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
         # Strategy 9 drifted weights (old = what's currently held, drifted to today)
         # Use last REBALANCE date (not last daily forward-filled date)
         _s9_rebal_dates_t = [r['dt'] for r in _dyn_rebal_log if r['dt'] <= today_ts]
-        _s9_ldt   = _s9_rebal_dates_t[-1] if _s9_rebal_dates_t else None
+        # If last rebalance is today, use the previous one as the "old" base
+        if _s9_rebal_dates_t and _s9_rebal_dates_t[-1] == today_ts:
+            _s9_ldt = _s9_rebal_dates_t[-2] if len(_s9_rebal_dates_t) >= 2 else None
+        else:
+            _s9_ldt = _s9_rebal_dates_t[-1] if _s9_rebal_dates_t else None
         _w_s9_old = w_dyn_old  # fallback
         if _s9_ldt and _s9_wbd:
             _s9_lw = _s9_wbd.get(_s9_ldt, pd.Series(dtype=float))
