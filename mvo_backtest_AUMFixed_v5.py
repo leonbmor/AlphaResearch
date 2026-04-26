@@ -4323,9 +4323,9 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 _w_dyn, _cands_dyn, _dt_dyn, Pxs_df, volumeRaw_df,
                 _dyn_aum, advp_cap, min_weight, max_weight, top_n, conc_factor)
             dyn_weights_by_date[_dt_dyn] = _w_filtered
-            # Keep smart_hybrid_weights_by_date in sync
-            if _dt_dyn in smart_hybrid_weights_by_date:
-                smart_hybrid_weights_by_date[_dt_dyn] = _w_filtered
+            # Note: smart_hybrid_weights_by_date is NOT synced here —
+            # it tracks the true smart hybrid (DD-based alpha/hybrid/mvo blend)
+            # separately from the dynamic strategy
         # Recompute nav_dynamic with corrected weights
         nav_dynamic = (_mb_run_nav(dyn_weights_by_date, sorted(dyn_weights_by_date.keys()),
                                    Pxs_df, cost_by_date=_cost_by_date["dynamic"])
@@ -5062,7 +5062,7 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
 
     # -- Live hybrid portfolio P&L since last rebalance -----------------------
     print("\n  " + "=" * 72)
-    print("  LIVE SMART HYBRID PORTFOLIO -- P&L SINCE LAST REBALANCE")
+    print("  LIVE DYNAMIC PORTFOLIO -- P&L SINCE LAST REBALANCE")
     print("  " + "=" * 72)
 
     def _live_pnl_hybrid(weights_by_date, Pxs_df):
@@ -5121,17 +5121,25 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                   f"{day_ret*100:>+8.2f}%  {cum_ret*100:>+8.2f}%  "
                   + "  ".join(parts))
 
-    _live_pnl_hybrid(smart_hybrid_weights_by_date, Pxs_df)
+    _live_pnl_hybrid(dyn_weights_by_date, Pxs_df)
 
     # -- Current live portfolio (most recent rebalance, held today) ------------
     print("\n  " + "=" * 72)
-    print("  CURRENT LIVE SMART HYBRID PORTFOLIO (as of last rebalance)")
+    # Determine current regime label for display
+    _live_regime_lbl = 'alpha'
+    if today_ts in regime_s.index:
+        _rv_today = regime_s[today_ts]
+        _live_regime_lbl = ('mvo' if _rv_today >= 1.0 else
+                            'hybrid' if _rv_today >= 0.5 else 'alpha')
+
+    print("  CURRENT LIVE DYNAMIC PORTFOLIO (as of last rebalance)")
+    print(f"  [regime={_live_regime_lbl}]")
     print("  " + "=" * 72)
     today_ts    = Pxs_df.index[-1]
-    past_rebals = sorted([d for d in smart_hybrid_weights_by_date if d <= today_ts])
+    past_rebals = sorted([d for d in dyn_weights_by_date if d <= today_ts])
     if past_rebals:
         live_dt = past_rebals[-1]
-        w_live  = smart_hybrid_weights_by_date[live_dt]
+        w_live  = dyn_weights_by_date[live_dt]
         w_live  = w_live[w_live > 1e-6].sort_values(ascending=False)
         # Drifted weights: adjust for price moves since rebalance
         tickers_live = [t for t in w_live.index if t in Pxs_df.columns]
