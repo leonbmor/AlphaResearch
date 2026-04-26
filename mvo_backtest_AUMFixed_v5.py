@@ -4609,29 +4609,82 @@ def run_mvo_backtest(Pxs_df, sectors_s, weights_by_year, regime_s,
                 for _rec9 in _dyn_rebal_log:
                     _dt9 = _rec9['dt']; _reg9 = _rec9['regime']
                     _p9  = _port_cache.get(_dt9, {})
-                    # MVO regime: skip filter, use standard MVO portfolio
-                    if _reg9 == 'mvo':
-                        _w9 = _p9.get('mvo', pd.Series(dtype=float))
-                    else:
-                        _w9 = _p9.get(f'{_reg9}_excl', _p9.get(_reg9, pd.Series(dtype=float)))
-                    if _w9.empty: _w9 = _rec9['w'].copy()
 
-                    # Apply ADVP filter with replacement using correct running AUM
-                    _cands9 = _p9.get('candidates', pd.Series(dtype=float))
-                    _s9_aum = AUM * _s9_running_nav
-                    if volumeRaw_df is not None and not _cands9.empty and not _w9.empty:
-                        _w9_before = _w9.copy()
-                        _w9 = _advp_filter_and_replace(
-                            _w9, _cands9, _dt9, Pxs_df, volumeRaw_df,
-                            _s9_aum, advp_cap, min_weight, max_weight,
-                            top_n, conc_factor)
-                        # Log if filter changed anything
-                        _changed = set(_w9_before.index) != set(_w9.index)
-                        if _changed and _dt9.year >= 2024:
-                            _removed = set(_w9_before.index) - set(_w9.index)
-                            _added   = set(_w9.index) - set(_w9_before.index)
-                            print(f"  [S9 ADVP] {_dt9.date()}  AUM=${_s9_aum:,.0f}"
-                                  f"  removed={sorted(_removed)}  added={sorted(_added)}")
+                    # Start from the ADVP-filtered standard portfolio (already computed)
+                    # This guarantees zero-MR stocks stay in the excl portfolio
+                    _w9_base = dyn_weights_by_date.get(_dt9, _rec9['w'].copy())
+
+                    # Apply MR penalty: swap out positive-MR stocks for better-ranked
+                    # candidates from the penalised composite
+                    _cands9  = _p9.get('candidates', pd.Series(dtype=float))
+                    _s9_aum  = AUM * _s9_running_nav
+
+                    if not _cands9.empty and (MR_K > 0 or MR_CAP > 0):
+                        # Build penalised scores from candidates
+                        _mr_dt9 = _load_momentum_exclusions(_dt9)
+                        _cands9_pen = _cands9.copy()
+                        if MR_K > 0:
+                            for _tkr_mr, _mr_s in _mr_dt9.items():
+                                if _tkr_mr in _cands9_pen and _mr_s > 0:
+                                    _cands9_pen[_tkr_mr] = _cands9_pen[_tkr_mr] / np.exp(MR_K * _mr_s)
+                        # Hard-exclude MR_CAP names
+                        _mr_n9 = int(MR_CAP * len(_cands9)) if MR_CAP > 0 else 0
+                        _excl9 = set(list(_mr_dt9.keys())[:_mr_n9]) if _mr_n9 > 0 else set()
+
+                        # Start from standard portfolio, replace positive-MR stocks
+                        _w9 = _w9_base.copy()
+                        _penalised_in_port = {t: _mr_dt9[t] for t in _w9.index
+                                              if t in _mr_dt9 and _mr_dt9[t] > 0
+                                              or t in _excl9}
+                        if _penalised_in_port:
+                            # Remove penalised stocks
+                            _w9 = _w9.drop(index=[t for t in _penalised_in_port if t in _w9.index])
+                            # Find replacements from penalised-ranked candidates
+                            _ranked_pen = _cands9_pen.drop(index=[t for t in _excl9
+                                                                    if t in _cands9_pen.index],
+                                                            errors='ignore')
+                            _ranked_pen = _ranked_pen.sort_values(ascending=False)
+                            _n_needed   = top_n - len(_w9)
+                            _added9     = []
+                            for _tkr_r in _ranked_pen.index:
+                                if len(_added9) >= _n_needed: break
+                                if _tkr_r in _w9.index or _tkr_r in _excl9: continue
+                                if _tkr_r not in pxs_cols: continue
+                                _added9.append(_tkr_r)
+                            if _added9:
+                                _n_tot9  = len(_w9) + len(_added9)
+                                _w9_rep  = pd.Series(1.0 / _n_tot9, index=_added9)
+                                _w9      = pd.concat([_w9 * len(_w9) / _n_tot9, _w9_rep])
+                            _w9 = _w9 / _w9.sum() if _w9.sum() > 0 else _w9
+
+                        # Apply ADVP filter on top
+                        if volumeRaw_df is not None and not _cands9.empty:
+                            _w9_before = _w9.copy()
+                            _w9 = _advp_filter_and_replace(
+                                _w9, _cands9_pen, _dt9, Pxs_df, volumeRaw_df,
+                                _s9_aum, advp_cap, min_weight, max_weight,
+                                top_n, conc_factor)
+                            _changed = set(_w9_before.index) != set(_w9.index)
+                            if _changed and _dt9.year >= 2024:
+                                _removed = set(_w9_before.index) - set(_w9.index)
+                                _added   = set(_w9.index) - set(_w9_before.index)
+                                print(f"  [S9 ADVP] {_dt9.date()}  AUM=${_s9_aum:,.0f}"
+                                      f"  removed={sorted(_removed)}  added={sorted(_added)}")
+                    else:
+                        # No MR penalty — excl = standard (guaranteed convergence)
+                        _w9 = _w9_base.copy()
+                        if volumeRaw_df is not None and not _cands9.empty:
+                            _w9_before = _w9.copy()
+                            _w9 = _advp_filter_and_replace(
+                                _w9, _cands9, _dt9, Pxs_df, volumeRaw_df,
+                                _s9_aum, advp_cap, min_weight, max_weight,
+                                top_n, conc_factor)
+                            _changed = set(_w9_before.index) != set(_w9.index)
+                            if _changed and _dt9.year >= 2024:
+                                _removed = set(_w9_before.index) - set(_w9.index)
+                                _added   = set(_w9.index) - set(_w9_before.index)
+                                print(f"  [S9 ADVP] {_dt9.date()}  AUM=${_s9_aum:,.0f}"
+                                      f"  removed={sorted(_removed)}  added={sorted(_added)}")
 
                     if not _w9_prev.empty:
                         _at9 = list(set(_w9.index)|set(_w9_prev.index))
