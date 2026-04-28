@@ -308,6 +308,8 @@ def compute_rolling_regime_weights(ic_results, ic_annual, Pxs_df,
     rebal_dates = pd.DatetimeIndex(valid_idx[::rebal_freq])
 
     WEIGHTS_CACHE_TBL = 'factor_weights_by_date'
+    # Cache key includes half_life_yrs so different decay params use separate caches
+    _hl_tag = f"{half_life_yrs:.3f}"
 
     def _ensure_weights_table():
         with ENGINE.begin() as conn:
@@ -317,17 +319,46 @@ def compute_rolling_regime_weights(ic_results, ic_annual, Pxs_df,
                     factor         VARCHAR(20) NOT NULL,
                     weight         FLOAT       NOT NULL,
                     model_version  VARCHAR(5)  NOT NULL,
-                    PRIMARY KEY (date, factor, model_version)
+                    half_life      VARCHAR(10) NOT NULL DEFAULT '0.000',
+                    PRIMARY KEY (date, factor, model_version, half_life)
                 )
             """))
+            # Migrate existing table: add half_life column and fix primary key
+            try:
+                conn.execute(text(f"""
+                    ALTER TABLE {WEIGHTS_CACHE_TBL}
+                    ADD COLUMN IF NOT EXISTS half_life VARCHAR(10) NOT NULL DEFAULT '0.000'
+                """))
+            except Exception:
+                pass
+            # Drop old primary key if it doesn't include half_life
+            try:
+                conn.execute(text(f"""
+                    DO $$
+                    DECLARE
+                        pk_name TEXT;
+                    BEGIN
+                        SELECT constraint_name INTO pk_name
+                        FROM information_schema.table_constraints
+                        WHERE table_name = '{WEIGHTS_CACHE_TBL}'
+                          AND constraint_type = 'PRIMARY KEY';
+                        IF pk_name IS NOT NULL THEN
+                            EXECUTE 'ALTER TABLE {WEIGHTS_CACHE_TBL} DROP CONSTRAINT ' || pk_name;
+                            ALTER TABLE {WEIGHTS_CACHE_TBL}
+                            ADD PRIMARY KEY (date, factor, model_version, half_life);
+                        END IF;
+                    END $$;
+                """))
+            except Exception:
+                pass
 
     def _load_weights_cache(mv):
         try:
             with ENGINE.connect() as conn:
                 rows = conn.execute(text(f"""
                     SELECT date, factor, weight FROM {WEIGHTS_CACHE_TBL}
-                    WHERE model_version = :mv ORDER BY date
-                """), {'mv': mv}).fetchall()
+                    WHERE model_version = :mv AND half_life = :hl ORDER BY date
+                """), {'mv': mv, 'hl': _hl_tag}).fetchall()
             if not rows:
                 return {}
             result = {}
@@ -346,15 +377,16 @@ def compute_rolling_regime_weights(ic_results, ic_annual, Pxs_df,
         for dt, w_s in wbd.items():
             for factor, weight in w_s.items():
                 rows.append({'date': dt.date(), 'factor': factor,
-                             'weight': float(weight), 'model_version': mv})
+                             'weight': float(weight), 'model_version': mv,
+                             'half_life': _hl_tag})
         if not rows:
             return
         with ENGINE.begin() as conn:
             conn.execute(text(f"""
                 INSERT INTO {WEIGHTS_CACHE_TBL}
-                    (date, factor, weight, model_version)
-                VALUES (:date, :factor, :weight, :model_version)
-                ON CONFLICT (date, factor, model_version) DO NOTHING
+                    (date, factor, weight, model_version, half_life)
+                VALUES (:date, :factor, :weight, :model_version, :half_life)
+                ON CONFLICT (date, factor, model_version, half_life) DO NOTHING
             """), rows)
         print(f"  weights_by_date: saved {len(wbd)} new dates to cache")
 
