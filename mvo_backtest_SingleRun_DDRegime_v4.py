@@ -131,7 +131,7 @@ MB_REBAL_FREQ  = 30       # default rebalance frequency (calendar days)
 MB_MODEL_VER   = 'v2'
 
 # ── Portfolio / position limits ───────────────────────────────────────────────
-AUM              = 20_000_000  # default AUM ($20M)
+AUM              = 5_000_000   # default AUM ($5M)
 TRADING_COST_BPS = 10          # one-way cost (bps)
 VOLUME_WINDOW    = 10          # rolling window for volume de-trending
 ADV_WINDOW       = 20          # days for median ADVP calculation
@@ -6078,7 +6078,7 @@ def run_backtest(
     mr_k                = MR_K,
     mr_cap              = MR_CAP,
     # Misc
-    aum                 = 5_000_000,
+    aum                 = AUM,
     trading_cost_bps    = TRADING_COST_BPS,
     rebal_freq          = 15,
     quality_floor       = QUALITY_FLOOR,
