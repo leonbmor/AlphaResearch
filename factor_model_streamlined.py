@@ -1671,6 +1671,97 @@ def _compute_ou_for_dates(calc_dates: pd.DatetimeIndex,
         ou_weight = (OU_WEIGHT_REF / halflives).clip(upper=OU_WEIGHT_CAP).fillna(0)
 
 
+def _compute_dynamic_size_for_dates(dates_to_calc: pd.DatetimeIndex,
+                                     universe: list,
+                                     Pxs_df: pd.DataFrame) -> pd.DataFrame:
+    """Compute dynamic market cap for each date using price × shares."""
+    us_tickers = [t + ' US' for t in universe]
+    with ENGINE.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT date, ticker, "Size" FROM valuation_consolidated
+            WHERE "Size" IS NOT NULL AND ticker = ANY(:tickers)
+            ORDER BY ticker, date
+        """), {"tickers": us_tickers}).fetchall()
+    size_raw           = pd.DataFrame(rows, columns=['date', 'ticker', 'Size'])
+    size_raw['date']   = pd.to_datetime(size_raw['date'])
+    size_raw['ticker'] = size_raw['ticker'].str.replace(' US', '', regex=False)
+    size_pivot = size_raw.pivot_table(
+        index='date', columns='ticker', values='Size', aggfunc='last'
+    )
+    all_px_dates   = Pxs_df.index
+    size_ff        = size_pivot.reindex(all_px_dates).ffill().bfill()
+    date_indicator = pd.DataFrame(
+        index=size_pivot.index, columns=size_pivot.columns,
+        data=np.tile(size_pivot.index.values.reshape(-1, 1),
+                     (1, len(size_pivot.columns)))
+    )
+    date_indicator = date_indicator.reindex(all_px_dates).ffill().bfill()
+    results = {}
+    for dt in dates_to_calc:
+        if dt not in Pxs_df.index:
+            continue
+        row = {}
+        for ticker in universe:
+            if ticker not in size_ff.columns:
+                continue
+            size_db = size_ff.loc[dt, ticker]
+            if pd.isna(size_db):
+                continue
+            db_date  = pd.Timestamp(date_indicator.loc[dt, ticker])
+            price_db = Pxs_df.loc[db_date, ticker] \
+                       if db_date in Pxs_df.index else np.nan
+            price_t  = Pxs_df.loc[dt, ticker]
+            if pd.isna(price_db) or price_db == 0 or pd.isna(price_t):
+                row[ticker] = size_db
+            else:
+                row[ticker] = (size_db / price_db) * price_t
+        results[dt] = row
+    df            = pd.DataFrame(results).T
+    df.index.name = 'date'
+    return df.reindex(columns=universe)
+
+
+def _load_resid_from_db(table_name: str, universe: list,
+                         last_n_dates: int = 300) -> pd.DataFrame:
+    """Load the last N calendar days of a residual table from DB."""
+    try:
+        with ENGINE.connect() as conn:
+            rows = conn.execute(text(f"""
+                SELECT date, ticker, resid FROM {table_name}
+                WHERE date >= (SELECT MAX(date) - INTERVAL '{last_n_dates} days'
+                               FROM {table_name})
+                ORDER BY date
+            """)).fetchall()
+        df = pd.DataFrame(rows, columns=['date', 'ticker', 'resid'])
+        df['date']  = pd.to_datetime(df['date'])
+        df['resid'] = df['resid'].astype(float)
+        return df.pivot_table(index='date', columns='ticker',
+                               values='resid', aggfunc='last')
+    except Exception as e:
+        print(f"  WARNING: could not load {table_name} from DB: {e}")
+        return pd.DataFrame()
+
+
+def _load_char_from_db(table_name: str, universe: list,
+                        last_n_dates: int = 300) -> pd.DataFrame:
+    """Load last N calendar days of a wide characteristic table."""
+    try:
+        with ENGINE.connect() as conn:
+            rows = conn.execute(text(f"""
+                SELECT date, ticker, score FROM {table_name}
+                WHERE date >= (SELECT MAX(date) - INTERVAL '{last_n_dates} days'
+                               FROM {table_name})
+            """)).fetchall()
+        df = pd.DataFrame(rows, columns=['date', 'ticker', 'score'])
+        df['date'] = pd.to_datetime(df['date'])
+        return df.pivot_table(index='date', columns='ticker',
+                               values='score', aggfunc='last').reindex(
+                               columns=universe)
+    except Exception as e:
+        print(f"  WARNING: could not load {table_name} from DB: {e}")
+        return pd.DataFrame()
+
+
 # ==============================================================================
 # POINT-IN-TIME WEIGHT INTEGRATION
 # These functions are called from within the factor model run sequence
@@ -2316,6 +2407,7 @@ def _update_value_pit_weights(dt, resid_size, Pxs_df, sectors_s, universe,
             t_stat = float(scipy_stats.ttest_1samp(arr, 0).statistic)
             if t_stat > 0:
                 weights[m] = t_stat
+
         if not weights:
             weights = {m: 1.0/len(VALUE_METRICS) for m in VALUE_METRICS}
         else:
