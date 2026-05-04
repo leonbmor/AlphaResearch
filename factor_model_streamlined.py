@@ -108,15 +108,25 @@ VALUE_IC_CACHE_TBL      = 'value_ic_bank'
 MAX_HORIZON_QUALITY     = 63
 MAX_HORIZON_VALUE       = 63
 QUALITY_METRICS_ALL     = [
-    'GS', 'GGP', 'GGP/GP_Vol', 'GGP*r2_GP', 'GS/S_Vol', 'GS*r2_S',
-    'FCF_PG', 'HSG', 'PSG', 'ROId', 'OM', 'OMd', 'OMd*r2_S',
-    'GE', 'GE/E_Vol', 'GE*r2_E', 'ISGD', 'LastSGD', 'SGD*r2_S', 'r&d',
+    'HSG', 'GS', 'GE', 'GGP', 'SGD', 'LastSGD', 'PIG', 'PSG',
+    'OM', 'ROI', 'FCF_PG', 'OMd', 'ROId', 'ISGD', 'r&d',
+    'GS/S_Vol', 'HSG/S_Vol', 'PSG/S_Vol', 'GE/E_Vol', 'PIG/E_Vol', 'GGP/GP_Vol',
+    'GS*r2_S', 'SGD*r2_S', 'OMd*r2_S', 'GE*r2_E', 'PIG*r2_E', 'GGP*r2_GP',
+]
+RAW_DB_COLS_QUALITY = [
+    'HSG', 'GS', 'GE', 'GGP', 'SGD', 'LastSGD', 'PIG', 'PSG',
+    'OM', 'ROI', 'FCF_PG', 'OMd', 'ROId', 'ISGD', 'r&d',
+    'S Vol', 'E Vol', 'GP Vol', 'r2 S', 'r2 E', 'r2 GP',
 ]
 QUALITY_EXCLUDE_METRICS = ['ROE', 'ROE-P', 'ROEd']
 QUALITY_MAX_COMPONENTS  = 10
 QUALITY_HORIZONS        = [21, 63]
+QUALITY_TOP_PCTILE      = 0.10
+QUALITY_WINSOR          = (0.01, 0.99)
+QUALITY_VOL_MIN         = 1.0
 QF_MAV_WINDOW           = 252
-QF_THRESHOLD            = 0.50
+QF_THRESHOLD            = 15    # bps — '10Y RATE' column is in bps
+QF_RATE_COL             = '10Y RATE'   # rate column in Pxs_df (in bps)
 VALUE_METRICS           = ['P/S', 'P/Ee', 'P/Eo', 'sP/S', 'sP/E', 'sP/GP', 'P/GP']
 VALUE_HORIZONS          = [21, 63]
 RESIDUAL_SOURCE_QUALITY = 'v2_factor_residuals_mkt'
@@ -1670,6 +1680,23 @@ def _compute_ou_for_dates(calc_dates: pd.DatetimeIndex,
         # ou_weight = min(OU_WEIGHT_REF / halflife, OU_WEIGHT_CAP), 0 if NaN
         ou_weight = (OU_WEIGHT_REF / halflives).clip(upper=OU_WEIGHT_CAP).fillna(0)
 
+        # Blend O-U rank and ST reversal rank
+        total_w = ou_weight + (1.0 - ou_weight.clip(upper=1.0))
+        final   = (ou_weight * ou_rank + (1.0 - ou_weight.clip(upper=1.0)) * rev_rank)
+        final   = final / total_w.where(total_w > 0)
+
+        # Cross-sectional z-score
+        valid = final.dropna()
+        if len(valid) > 1:
+            z = (valid - valid.mean()) / valid.std()
+            final[valid.index] = z
+
+        result[dt] = final
+
+    out = pd.DataFrame(result).T
+    out.index.name = 'date'
+    return out.reindex(columns=universe)
+
 
 def _compute_dynamic_size_for_dates(dates_to_calc: pd.DatetimeIndex,
                                      universe: list,
@@ -1785,18 +1812,23 @@ def _get_anchor_dates_value():
 
 
 def _get_rate_signal_q(Pxs_df, dt):
-    """Compute rate regime signal q at date dt. 0=easing, 1=tight."""
-    rate_col = 'USGG10YR' if 'USGG10YR' in Pxs_df.columns else 'USGG2YR'
-    if rate_col not in Pxs_df.columns:
+    """Compute rate regime signal q at date dt.
+    Uses '10Y RATE' column (in bps). Returns 0.0/0.5/1.0.
+    """
+    if QF_RATE_COL not in Pxs_df.columns:
+        return 0.5
+    rate = Pxs_df[QF_RATE_COL].dropna()
+    rate = rate[rate.index <= dt]
+    if len(rate) < QF_MAV_WINDOW // 2:
+        return 0.5
+    rate_mav = rate.iloc[-QF_MAV_WINDOW:].mean()
+    rate_mom = float(rate.iloc[-1]) - float(rate_mav)
+    if rate_mom >  QF_THRESHOLD:
+        return 1.0
+    elif rate_mom < -QF_THRESHOLD:
         return 0.0
-    rates = Pxs_df[rate_col].dropna()
-    rates = rates[rates.index <= dt]
-    if len(rates) < QF_MAV_WINDOW:
-        return 0.0
-    mav = rates.iloc[-QF_MAV_WINDOW:].mean()
-    diff = float(rates.iloc[-1]) - float(mav)
-    q = float(np.clip(diff / (QF_THRESHOLD * 2), 0.0, 1.0))
-    return q
+    else:
+        return 0.5
 
 
 def _load_quality_pit_cache():
@@ -1932,23 +1964,32 @@ def _ensure_value_ic_table():
 def _load_quality_snapshot(anchor_date):
     """Load quality fundamental snapshot from valuation_metrics_anchors."""
     try:
+        fetch_cols = list(dict.fromkeys(['Size'] + RAW_DB_COLS_QUALITY))
+        cols_sql   = ', '.join([f'"{m}"' for m in fetch_cols])
         with ENGINE.connect() as conn:
             df = pd.read_sql(text(f"""
-                SELECT * FROM {QUALITY_ANCHOR_TBL}
-                WHERE date = :dt
+                SELECT ticker, {cols_sql}
+                FROM {QUALITY_ANCHOR_TBL}
+                WHERE date = :dt AND ticker IS NOT NULL
             """), conn, params={'dt': anchor_date.date()})
         if df.empty:
             return pd.DataFrame()
-        df['ticker'] = df['ticker'].apply(clean_ticker)
-        return df.set_index('ticker').drop(columns=['date'], errors='ignore')
-    except Exception:
+        df['ticker'] = df['ticker'].apply(_quality_normalize_ticker)
+        snap = df.drop_duplicates('ticker').set_index('ticker')
+        for col in fetch_cols:
+            if col in snap.columns:
+                snap[col] = pd.to_numeric(snap[col], errors='coerce')
+        return snap
+    except Exception as e:
+        print(f"  WARNING: quality snapshot load failed ({e})")
         return pd.DataFrame()
 
 
 def _compute_quality_ic(snap, resid_mkt, sectors_s, Pxs_df, anchor, horizon,
                          eligible_metrics, universe):
-    """Compute IC for quality metrics at an anchor date."""
-    from scipy import stats as _st
+    """Compute IC for quality metrics at an anchor date.
+    Matches derive_weights logic from quality_factor.py exactly:
+    uses sector-ranked scores and top/bottom decile spread."""
     # Forward residuals from resid_mkt after anchor over horizon days
     fwd_dates = resid_mkt.index[resid_mkt.index > anchor]
     if len(fwd_dates) < horizon:
@@ -1959,18 +2000,30 @@ def _compute_quality_ic(snap, resid_mkt, sectors_s, Pxs_df, anchor, horizon,
     if len(fwd) < MIN_STOCKS:
         return {}
 
+    # Sector-rank the snap
+    snap_built = _build_derived_quality_metrics(snap)
+    ranked     = _rank_within_sector_quality(snap_built, sectors_s, eligible_metrics)
+
+    n_decile = max(1, int(np.floor(len(fwd) * QUALITY_TOP_PCTILE)))
+    sorted_ret     = fwd.sort_values(ascending=False)
+    top_tickers    = sorted_ret.iloc[:n_decile].index
+    bottom_tickers = sorted_ret.iloc[-n_decile:].index
+
     ics = {}
     for m in eligible_metrics:
-        if m not in snap.columns:
+        if m not in ranked.columns:
             continue
-        scores = snap[m].dropna()
-        # Sector-rank within universe
-        common = fwd.index.intersection(scores.index)
-        if len(common) < 20:
+        col = ranked[m].dropna()
+        if col.empty:
             continue
-        ic = float(_st.spearmanr(scores.reindex(common), fwd.reindex(common))[0])
-        if not np.isnan(ic):
-            ics[m] = ic
+        u_std = float(col.std())
+        if u_std <= 0:
+            continue
+        top_med    = float(col.reindex(top_tickers).dropna().median())
+        bottom_med = float(col.reindex(bottom_tickers).dropna().median())
+        if np.isnan(top_med) or np.isnan(bottom_med):
+            continue
+        ics[m] = (top_med - bottom_med) / u_std
     return ics
 
 
@@ -2098,14 +2151,17 @@ def _update_quality_pit_weights(dt, resid_mkt, Pxs_df, sectors_s, universe,
 
 
 def _compute_rate_signal_series(Pxs_df):
-    """Compute rolling rate regime signal q for all dates."""
-    rate_col = 'USGG10YR' if 'USGG10YR' in Pxs_df.columns else 'USGG2YR'
-    if rate_col not in Pxs_df.columns:
-        return pd.Series(0.0, index=Pxs_df.index)
-    rates = Pxs_df[rate_col].dropna()
-    mav   = rates.rolling(QF_MAV_WINDOW, min_periods=1).mean()
-    diff  = rates - mav
-    q     = (diff / (QF_THRESHOLD * 2)).clip(0.0, 1.0)
+    """Compute rate regime signal q for all dates.
+    Uses '10Y RATE' column (in bps). q=0.0/0.5/1.0.
+    """
+    if QF_RATE_COL not in Pxs_df.columns:
+        return pd.Series(0.5, index=Pxs_df.index)
+    rate     = Pxs_df[QF_RATE_COL].dropna()
+    rate_mav = rate.rolling(QF_MAV_WINDOW, min_periods=QF_MAV_WINDOW // 2).mean()
+    rate_mom = rate - rate_mav
+    q = pd.Series(0.5, index=rate_mom.index)
+    q[rate_mom >  QF_THRESHOLD] = 1.0
+    q[rate_mom < -QF_THRESHOLD] = 0.0
     return q
 
 
@@ -2180,54 +2236,88 @@ def _load_quality_scores_pit(universe, calc_dates, Pxs_df, sectors_s):
     return result
 
 
+def _quality_normalize_ticker(t):
+    return str(t).split(' ')[0].strip().upper()
+
+
+def _quality_winsorize(s):
+    lo, hi = QUALITY_WINSOR
+    return s.clip(lower=s.quantile(lo), upper=s.quantile(hi))
+
+
 def _build_derived_quality_metrics(snap):
-    """Build derived metrics from raw snapshot. Mirrors quality_factor.py logic."""
-    # Basic derived ratios — extend as needed to match quality_factor.py
-    try:
-        if 'GrossProfit' in snap.columns and 'Revenue' in snap.columns:
-            snap = snap.copy()
-        # Return as-is; full derivation is in quality_factor.py
-    except Exception:
-        pass
-    return snap
+    """Build derived metrics from raw snapshot. Mirrors quality_factor.build_derived_metrics."""
+    s = snap.copy()
+
+    def col(name):
+        return s[name] if name in s.columns else pd.Series(np.nan, index=s.index)
+
+    def safe_div(num, denom_name):
+        return col(num) / col(denom_name).clip(lower=QUALITY_VOL_MIN)
+
+    def safe_mul(base_name, r2_name):
+        return col(base_name) * col(r2_name)
+
+    s['GS/S_Vol']   = safe_div('GS',  'S Vol')
+    s['HSG/S_Vol']  = safe_div('HSG', 'S Vol')
+    s['PSG/S_Vol']  = safe_div('PSG', 'S Vol')
+    s['GE/E_Vol']   = safe_div('GE',  'E Vol')
+    s['PIG/E_Vol']  = safe_div('PIG', 'E Vol')
+    s['GGP/GP_Vol'] = safe_div('GGP', 'GP Vol')
+    s['GS*r2_S']    = safe_mul('GS',  'r2 S')
+    s['SGD*r2_S']   = safe_mul('SGD', 'r2 S')
+    s['OMd*r2_S']   = safe_mul('OMd', 'r2 S')
+    s['GE*r2_E']    = safe_mul('GE',  'r2 E')
+    s['PIG*r2_E']   = safe_mul('PIG', 'r2 E')
+    s['GGP*r2_GP']  = safe_mul('GGP', 'r2 GP')
+    return s
+
+
+def _rank_within_sector_quality(snap, sectors_s, metrics):
+    """Rank stocks within sector on each metric. Mirrors quality_factor.rank_within_sector."""
+    ranked = pd.DataFrame(index=snap.index)
+    # Normalize sectors_s index to bare tickers
+    sec = sectors_s.copy()
+    sec.index = [_quality_normalize_ticker(t) for t in sec.index]
+    sec = sec.reindex(snap.index)
+
+    for m in metrics:
+        if m not in snap.columns:
+            ranked[m] = np.nan
+            continue
+        col = snap[m].copy()
+        out = pd.Series(np.nan, index=snap.index)
+        for sector, grp_idx in sec.groupby(sec).groups.items():
+            grp = col.reindex(grp_idx).dropna()
+            if len(grp) < 3:
+                continue
+            grp_w = _quality_winsorize(grp)
+            r     = grp_w.rank(method='average')
+            out.loc[r.index] = (r - 1) / (len(r) - 1) if len(r) > 1 else 0.5
+        ranked[m] = out
+    return ranked
 
 
 def _compute_quality_composite(snap, sectors_s, gqf_w, cqf_w, q, universe):
-    """Compute composite quality score for stocks. Returns Series(ticker→score)."""
-    eligible = [m for m in QUALITY_METRICS_ALL if m not in QUALITY_EXCLUDE_METRICS]
+    """Compute composite quality score. Mirrors quality_factor.compute_composite_scores."""
+    all_metrics = list(set(list(gqf_w.keys()) + list(cqf_w.keys())))
+    ranked      = _rank_within_sector_quality(snap, sectors_s, all_metrics)
 
-    def _score_regime(weights):
+    def weighted_score(weights):
         if not weights:
-            return pd.Series(dtype=float)
-        composite = pd.Series(0.0, index=snap.index)
-        total_w = 0.0
+            return pd.Series(np.nan, index=ranked.index)
+        score = pd.Series(0.0, index=ranked.index)
+        total = 0.0
         for m, w in weights.items():
-            if m not in snap.columns:
+            if m not in ranked.columns:
                 continue
-            col = snap[m].dropna()
-            if col.empty:
-                continue
-            # Normalize 0-1 within universe
-            min_v, max_v = col.min(), col.max()
-            if max_v == min_v:
-                continue
-            normed = (col - min_v) / (max_v - min_v)
-            composite = composite.add(w * normed, fill_value=0.0)
-            total_w += w
-        if total_w > 0:
-            composite /= total_w
-        return composite.reindex(universe).dropna()
+            score = score.add(ranked[m] * w, fill_value=0)
+            total += w
+        return score / total if total > 0 else pd.Series(np.nan, index=ranked.index)
 
-    gqf_scores = _score_regime(gqf_w)
-    cqf_scores = _score_regime(cqf_w)
-
-    common = gqf_scores.index.intersection(cqf_scores.index)
-    if common.empty:
-        scores = gqf_scores if not gqf_scores.empty else cqf_scores
-    else:
-        scores = (1 - q) * gqf_scores.reindex(common) + \
-                  q * cqf_scores.reindex(common)
-    return scores.dropna()
+    scores = ((1 - q) * weighted_score(gqf_w) +
+               q      * weighted_score(cqf_w)).dropna()
+    return scores.reindex(universe).dropna()
 
 
 def _save_quality_scores(new_scores):
@@ -2463,6 +2553,129 @@ def _update_value_pit_weights(dt, resid_size, Pxs_df, sectors_s, universe,
 
     # Refresh last anchor IC
     _refresh_value_ic_last_anchor(resid_size, anchor_dates, all_px_dates)
+
+
+def _recompute_value_scores(sectors_s):
+    """
+    Recompute and save value composite scores to value_scores_df
+    using current PIT weights from value_weights_pit.
+    Called after _update_value_pit_weights in full recalculation.
+    """
+    print("  Recomputing value scores with PIT weights...")
+    pit_cache = _load_value_pit_cache()
+    pit_dates = sorted(pit_cache.keys())
+
+    # Get all valuation dates
+    try:
+        with ENGINE.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT DISTINCT date FROM valuation_consolidated ORDER BY date"
+            )).fetchall()
+        val_dates = [pd.Timestamp(r[0]) for r in rows]
+    except Exception as e:
+        print(f"  WARNING: could not get valuation dates: {e}")
+        return
+
+    if not val_dates:
+        print("  WARNING: no valuation dates found")
+        return
+
+    # Load raw valuation data
+    try:
+        with ENGINE.connect() as conn:
+            df_all = pd.read_sql(text(f"""
+                SELECT date, ticker, {', '.join(f'"{m}"' for m in VALUE_METRICS)}
+                FROM valuation_consolidated
+                WHERE ticker IS NOT NULL
+                ORDER BY date
+            """), conn)
+    except Exception as e:
+        print(f"  WARNING: could not load valuation data: {e}")
+        return
+
+    df_all['date']   = pd.to_datetime(df_all['date'])
+    df_all['ticker'] = df_all['ticker'].apply(
+        lambda t: t.replace(' US', '') if isinstance(t, str) else t)
+
+    # Normalize sectors_s index
+    sec_s = sectors_s.copy()
+    sec_s.index = sec_s.index.str.replace(' US', '')
+
+    rows_to_save = []
+    n_dates = 0
+
+    for val_date, grp in df_all.groupby('date'):
+        snap = grp.drop(columns='date').drop_duplicates('ticker').set_index('ticker')
+        for m in VALUE_METRICS:
+            if m in snap.columns:
+                snap[m] = pd.to_numeric(snap[m], errors='coerce')
+        snap['_sector'] = snap.index.map(sec_s)
+        snap = snap[snap['_sector'].notna()]
+        if snap.empty:
+            continue
+
+        # Get PIT weights for this date
+        prior = [d for d in pit_dates if d <= val_date]
+        if prior:
+            w = pit_cache[prior[-1]]
+            w = {m: v for m, v in w.items() if m != '_sentinel'}
+        else:
+            w = {m: 1.0/len(VALUE_METRICS) for m in VALUE_METRICS}
+
+        if not w:
+            w = {m: 1.0/len(VALUE_METRICS) for m in VALUE_METRICS}
+
+        # Sector-rank each metric
+        metric_scores = {}
+        for m in VALUE_METRICS:
+            if m not in snap.columns:
+                continue
+            scores = pd.Series(np.nan, index=snap.index)
+            for sec, sg in snap.groupby('_sector'):
+                vals = sg[m].dropna()
+                if len(vals) < 3:
+                    continue
+                pos = vals > 0
+                if pos.any():
+                    adj = vals.copy()
+                    adj[~pos] = vals[pos].max() + vals[~pos].abs()
+                else:
+                    adj = vals.abs().max() - vals
+                ranks = adj.rank(method='average', ascending=True)
+                normed = (1.0 - (ranks - 1) / (len(ranks) - 1)) \
+                         if len(ranks) > 1 else pd.Series(0.5, index=ranks.index)
+                scores.loc[normed.index] = normed
+            metric_scores[m] = scores
+
+        composite = pd.Series(0.0, index=snap.index)
+        total_w = 0.0
+        for m, wt in w.items():
+            if m in metric_scores:
+                s = metric_scores[m].reindex(snap.index)
+                valid = s.notna()
+                composite[valid] += wt * s[valid]
+                total_w += wt
+        if total_w > 0:
+            composite /= total_w
+
+        for ticker, score in composite.items():
+            if pd.notna(score):
+                rows_to_save.append({'date': pd.Timestamp(val_date).date(),
+                                     'ticker': ticker, 'score': float(score)})
+        n_dates += 1
+
+    if not rows_to_save:
+        print("  WARNING: no value scores computed")
+        return
+
+    df_save    = pd.DataFrame(rows_to_save)
+    saved_dates = list({r['date'] for r in rows_to_save})
+    with ENGINE.begin() as conn:
+        conn.execute(text(
+            f"DELETE FROM {VALUE_SCORES_TBL} WHERE date = ANY(:dates)"
+        ), {'dates': saved_dates})
+    df_save.to_sql(VALUE_SCORES_TBL, ENGINE, if_exists='append', index=False)
+    print(f"  Saved {len(df_save):,} value score rows ({n_dates} dates)")
 
 
 def _refresh_value_ic_last_anchor(resid_size, anchor_dates, all_px_dates):
@@ -3174,6 +3387,8 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
     _update_value_pit_weights(
         all_dates[-1], resid_size_full, Pxs_df, sectors_s, universe, all_dates
     )
+    # Recompute value scores using updated PIT weights
+    _recompute_value_scores(sectors_s)
     value_df = _load_value_scores_pit(universe, valid_ext)
 
     # ── Step 5: Value ⊥ {beta, quality, mom, size} ───────────────────────────
@@ -3322,26 +3537,38 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
           f"{len(ou_dates_to_calc)}")
 
     if len(ou_dates_to_calc) > 0:
-        new_ou = _compute_ou_for_dates(
-            ou_dates_to_calc, universe, resid_sec_full, Pxs_df,
-            volumeTrd_df if use_vol_scale else None
-        )
-        if new_ou is None or new_ou.empty:
-            print("  WARNING: O-U computation returned no results")
-        else:
+        BATCH_SIZE = 200
+        batches = [ou_dates_to_calc[i:i+BATCH_SIZE]
+                   for i in range(0, len(ou_dates_to_calc), BATCH_SIZE)]
+        print(f"  Computing in {len(batches)} batches of {BATCH_SIZE}...")
+
+        with ENGINE.begin() as conn:
+            conn.execute(text(f"""
+                CREATE TABLE IF NOT EXISTS {V2_OU_TBL} (
+                    date DATE, ticker VARCHAR(20), ou_score NUMERIC,
+                    PRIMARY KEY (date, ticker)
+                )
+            """))
+
+        total_saved = 0
+        for b_idx, batch in enumerate(batches):
+            new_ou = _compute_ou_for_dates(
+                batch, universe, resid_sec_full, Pxs_df,
+                volumeTrd_df if use_vol_scale else None
+            )
+            if new_ou is None or new_ou.empty:
+                print(f"\n  WARNING: batch {b_idx+1} returned no results")
+                continue
             long         = new_ou.stack(dropna=False).reset_index()
             long.columns = ['date', 'ticker', 'ou_score']
             long         = long.dropna(subset=['ou_score'])
             long['date'] = pd.to_datetime(long['date'])
-            with ENGINE.begin() as conn:
-                conn.execute(text(f"""
-                    CREATE TABLE IF NOT EXISTS {V2_OU_TBL} (
-                        date DATE, ticker VARCHAR(20), ou_score NUMERIC,
-                        PRIMARY KEY (date, ticker)
-                    )
-                """))
             long.to_sql(V2_OU_TBL, ENGINE, if_exists='append', index=False)
-            print(f"  Saved {len(long):,} rows to '{V2_OU_TBL}'")
+            total_saved += len(long)
+            print(f"  Batch {b_idx+1}/{len(batches)} saved "
+                  f"({len(batch)} dates, {len(long):,} rows)", flush=True)
+
+        print(f"  O-U total saved: {total_saved:,} rows")
 
     date_list = [d.date() for d in common_dates]
     try:
