@@ -3392,12 +3392,23 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
 # ENTRY POINT
 # ===============================================================================
 
-def run(Pxs_df, sectors_s, volumeTrd_df=None):
+def run(Pxs_df, sectors_s, volumeTrd_df=None, force_rebuild_pit=False):
     print("=" * 70)
     print("  FACTOR MODEL v2")
     print("  Sequence: Beta → Quality → Idio Mom → Size → Value → SI → "
           "GK Vol → Macro → Sectors → O-U")
     print("=" * 70)
+
+    if force_rebuild_pit:
+        print("  force_rebuild_pit=True — wiping quality and value PIT weight caches...")
+        _ensure_quality_pit_table()
+        _ensure_value_pit_table()
+        _ensure_value_ic_table()
+        with ENGINE.begin() as conn:
+            conn.execute(text(f"DELETE FROM {QUALITY_WEIGHTS_PIT_TBL}"))
+            conn.execute(text(f"DELETE FROM {VALUE_WEIGHTS_PIT_TBL}"))
+            conn.execute(text(f"DELETE FROM {VALUE_IC_CACHE_TBL}"))
+        print("  PIT caches cleared.")
 
     Pxs_df    = Pxs_df.loc[:, ~Pxs_df.columns.duplicated(keep='first')]
     sectors_s = sectors_s[~sectors_s.index.duplicated(keep='first')]
