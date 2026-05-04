@@ -2398,7 +2398,8 @@ def _update_value_pit_weights(dt, resid_size, Pxs_df, sectors_s, universe,
                     if ic is not None:
                         metric_ics[m].append(ic)
 
-        weights = {}
+        # ── Derive weights from current IC evidence ───────────────────────────
+        current_weights = {}
         for m in VALUE_METRICS:
             ics = metric_ics[m]
             if len(ics) < 2:
@@ -2406,13 +2407,57 @@ def _update_value_pit_weights(dt, resid_size, Pxs_df, sectors_s, universe,
             arr = np.array(ics)
             t_stat = float(scipy_stats.ttest_1samp(arr, 0).statistic)
             if t_stat > 0:
-                weights[m] = t_stat
+                current_weights[m] = t_stat
 
-        if not weights:
-            weights = {m: 1.0/len(VALUE_METRICS) for m in VALUE_METRICS}
+        # Normalize current weights
+        if current_weights:
+            total = sum(current_weights.values())
+            current_weights = {m: w/total for m, w in current_weights.items()}
+
+        # ── Warm-start blending if fewer than 2 metrics pass ─────────────────
+        MIN_METRICS = 2
+        if len(current_weights) < MIN_METRICS:
+            # Find most recent prior cutoff with >= MIN_METRICS metrics
+            prior_weights = None
+            cached_pit = _load_value_pit_cache()
+            for prior_cutoff in sorted(cached_pit.keys(), reverse=True):
+                if prior_cutoff >= cutoff:
+                    continue
+                pw = cached_pit[prior_cutoff]
+                # Exclude sentinel entries
+                pw = {m: w for m, w in pw.items() if m != '_sentinel'}
+                if len(pw) >= MIN_METRICS:
+                    prior_weights = pw
+                    break
+
+            if prior_weights is None:
+                # No prior stable period — use equal weights
+                weights = {m: 1.0/len(VALUE_METRICS) for m in VALUE_METRICS}
+                print(f"    cutoff={cutoff.date()}: {len(current_weights)} metrics — "
+                      f"no prior stable period, using equal weights")
+            elif len(current_weights) == 0:
+                # Zero current metrics — forward-fill prior weights entirely
+                weights = prior_weights.copy()
+                print(f"    cutoff={cutoff.date()}: 0 metrics — "
+                      f"using prior stable weights ({len(weights)} metrics)")
+            else:
+                # 1 current metric — 60% to current, 40% distributed from prior
+                # excluding any metric already in current
+                surviving = list(current_weights.keys())[0]
+                imported  = {m: w for m, w in prior_weights.items()
+                             if m != surviving}
+                if not imported:
+                    # Prior had same single metric — just use current
+                    weights = current_weights.copy()
+                else:
+                    total_imported = sum(imported.values())
+                    weights = {surviving: 0.60}
+                    for m, w in imported.items():
+                        weights[m] = 0.40 * (w / total_imported)
+                print(f"    cutoff={cutoff.date()}: 1 current metric ({surviving}) "
+                      f"+ {len(imported)} imported — warm-start blend applied")
         else:
-            total = sum(weights.values())
-            weights = {m: w/total for m, w in weights.items()}
+            weights = current_weights
         _save_value_pit_weights(cutoff, weights)
         print(f"    cutoff={cutoff.date()}: {len(weights)} value metrics weighted")
 
@@ -2651,11 +2696,6 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
         all_rets, dynamic_size, calc_dates, universe
     )
 
-    # ── PIT Quality Weights Update (after Step 1) ─────────────────────────────
-    _update_quality_pit_weights(dt, r_mkt, Pxs_df, sectors_s, universe, all_dates)
-    # Reload quality scores with fresh PIT weights
-    quality_df = _load_quality_scores_pit(universe, valid_ext, Pxs_df, sectors_s)
-
     # ── Step 2: Quality ⊥ {beta} ─────────────────────────────────────────────
     quality_perp = orthogonalize_char_df(
         quality_df, {'beta': beta_df}, calc_dates, dynamic_size=dynamic_size
@@ -2706,11 +2746,6 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
         ['size'], {'size': size_perp},
         r_mom, dynamic_size, calc_dates, universe
     )
-
-    # ── PIT Value Weights Update (after Step 4) ───────────────────────────────
-    _update_value_pit_weights(dt, r_size, Pxs_df, sectors_s, universe, all_dates)
-    # Reload value scores with fresh PIT weights
-    value_df = _load_value_scores_pit(universe, valid_ext)
 
     # ── Step 5: Value ⊥ {beta, quality, mom, size} ───────────────────────────
     value_perp = orthogonalize_char_df(
