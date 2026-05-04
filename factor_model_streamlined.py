@@ -2428,21 +2428,24 @@ def load_ou_reversion_v2(universe, calc_dates, resid_pivot,
     if len(dates_to_calc) > 0:
         print(f"  Computing v2 O-U for {len(dates_to_calc)} new dates "
               f"({len(already_done)} already in cache)...")
-        new_df       = _compute_ou_for_dates(dates_to_calc, universe,
-                                              resid_pivot, Pxs_df, volumeTrd_df)
-        long         = new_df.stack(dropna=False).reset_index()
-        long.columns = ['date', 'ticker', 'ou_score']
-        long         = long.dropna(subset=['ou_score'])
-        long['date'] = pd.to_datetime(long['date'])
-        with ENGINE.begin() as conn:
-            conn.execute(text(f"""
-                CREATE TABLE IF NOT EXISTS {V2_OU_TBL} (
-                    date DATE, ticker VARCHAR(20), ou_score NUMERIC,
-                    PRIMARY KEY (date, ticker)
-                )
-            """))
-        long.to_sql(V2_OU_TBL, ENGINE, if_exists='append', index=False)
-        print(f"  Saved {len(long):,} rows to '{V2_OU_TBL}'")
+        new_df = _compute_ou_for_dates(dates_to_calc, universe,
+                                        resid_pivot, Pxs_df, volumeTrd_df)
+        if new_df is None or new_df.empty:
+            print("  WARNING: O-U computation returned no results")
+        else:
+            long         = new_df.stack(dropna=False).reset_index()
+            long.columns = ['date', 'ticker', 'ou_score']
+            long         = long.dropna(subset=['ou_score'])
+            long['date'] = pd.to_datetime(long['date'])
+            with ENGINE.begin() as conn:
+                conn.execute(text(f"""
+                    CREATE TABLE IF NOT EXISTS {V2_OU_TBL} (
+                        date DATE, ticker VARCHAR(20), ou_score NUMERIC,
+                        PRIMARY KEY (date, ticker)
+                    )
+                """))
+            long.to_sql(V2_OU_TBL, ENGINE, if_exists='append', index=False)
+            print(f"  Saved {len(long):,} rows to '{V2_OU_TBL}'")
     else:
         print(f"  v2 O-U: all {len(calc_dates)} dates already cached")
 
@@ -3192,23 +3195,26 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
           f"{len(ou_dates_to_calc)}")
 
     if len(ou_dates_to_calc) > 0:
-        new_ou       = _compute_ou_for_dates(
+        new_ou = _compute_ou_for_dates(
             ou_dates_to_calc, universe, resid_sec_full, Pxs_df,
             volumeTrd_df if use_vol_scale else None
         )
-        long         = new_ou.stack(dropna=False).reset_index()
-        long.columns = ['date', 'ticker', 'ou_score']
-        long         = long.dropna(subset=['ou_score'])
-        long['date'] = pd.to_datetime(long['date'])
-        with ENGINE.begin() as conn:
-            conn.execute(text(f"""
-                CREATE TABLE IF NOT EXISTS {V2_OU_TBL} (
-                    date DATE, ticker VARCHAR(20), ou_score NUMERIC,
-                    PRIMARY KEY (date, ticker)
-                )
-            """))
-        long.to_sql(V2_OU_TBL, ENGINE, if_exists='append', index=False)
-        print(f"  Saved {len(long):,} rows to '{V2_OU_TBL}'")
+        if new_ou is None or new_ou.empty:
+            print("  WARNING: O-U computation returned no results")
+        else:
+            long         = new_ou.stack(dropna=False).reset_index()
+            long.columns = ['date', 'ticker', 'ou_score']
+            long         = long.dropna(subset=['ou_score'])
+            long['date'] = pd.to_datetime(long['date'])
+            with ENGINE.begin() as conn:
+                conn.execute(text(f"""
+                    CREATE TABLE IF NOT EXISTS {V2_OU_TBL} (
+                        date DATE, ticker VARCHAR(20), ou_score NUMERIC,
+                        PRIMARY KEY (date, ticker)
+                    )
+                """))
+            long.to_sql(V2_OU_TBL, ENGINE, if_exists='append', index=False)
+            print(f"  Saved {len(long):,} rows to '{V2_OU_TBL}'")
 
     date_list = [d.date() for d in common_dates]
     try:
