@@ -150,7 +150,7 @@ def _ics_ensure_ic_cache_table():
 
 
 def _ics_load_cached_ic(model_version):
-    """Load all cached IC values for a model version. Returns dict {factor: DataFrame}."""
+    """Load all cached IC values. Returns (dict {factor: DataFrame}, set of all dates)."""
     try:
         with ENGINE.connect() as conn:
             df = pd.read_sql(text(f"""
@@ -162,13 +162,14 @@ def _ics_load_cached_ic(model_version):
         if df.empty:
             return {}, set()
         df['date'] = pd.to_datetime(df['date'])
-        cached_dates = set(df['date'].unique())
         ic_results = {}
         for factor, grp in df.groupby('factor'):
             pivot = grp.pivot_table(index='date', columns='horizon',
                                     values='ic_value', aggfunc='last')
             ic_results[factor] = pivot
-        return ic_results, cached_dates
+        # Return all dates across all factors (used only for display)
+        all_cached_dates = set(df['date'].unique())
+        return ic_results, all_cached_dates
     except Exception:
         return {}, set()
 
@@ -864,12 +865,26 @@ def run_ic_study_alpha(Pxs_df, sectors_s,
         cached_ic, cached_dates = {}, set()
         print(f"  Force recompute: computing all {len(calc_dates)} dates")
     else:
-        cached_ic, cached_dates = _ics_load_cached_ic(model_version)
+        cached_ic, cached_dates_by_factor = _ics_load_cached_ic(model_version)
+        # Use intersection of cached dates across ALL expected factors
+        # so that any factor missing from cache triggers recomputation
+        expected_factors = {'Quality', 'Idio_Mom', 'Value', 'OU', 'Mom_12M1'}
+        if cached_ic:
+            factor_date_sets = []
+            for f in expected_factors:
+                if f in cached_ic and not cached_ic[f].empty:
+                    factor_date_sets.append(set(cached_ic[f].index))
+                else:
+                    factor_date_sets.append(set())  # missing factor → no cached dates
+            # Dates cached for ALL factors
+            cached_dates = set.intersection(*factor_date_sets) if factor_date_sets else set()
+        else:
+            cached_dates = set()
         missing_dates = pd.DatetimeIndex(
             [d for d in calc_dates if d not in cached_dates]
         )
-        print(f"  IC cache: {len(cached_dates)} dates cached, "
-              f"{len(missing_dates)} new dates to compute")
+        print(f"  IC cache: {len(cached_dates)} complete dates, "
+              f"{len(missing_dates)} dates to compute")
 
     missing_dates = pd.DatetimeIndex(
         [d for d in calc_dates if d not in cached_dates]
