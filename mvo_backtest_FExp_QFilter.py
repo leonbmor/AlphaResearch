@@ -6505,12 +6505,6 @@ def run_backtest(
     print("  Loading factor scores for exposure tracking...")
     _factor_scores = _load_factor_scores_wide(calc_dates_full)
     print("  Factor scores loaded.")
-
-    STRATEGY_LABELS = {
-        S_BASE: 'Baseline', S_ALPHA: 'Alpha', S_MVO: 'MVO',
-        S_HYB: 'Hybrid', S_SMART: 'Smart', S_DYN: 'Dynamic',
-        S_HEDGE: 'Dyn+Hedge', S_DD: 'DD Policy', S_EXCL: 'Excl',
-    }
     if mode == 'rebuild':
         with ENGINE.connect() as conn:
             conn.execute(text(f"""
@@ -6527,6 +6521,12 @@ def run_backtest(
     #             5=Dynamic, 6=Dyn+Hedge, 7=DD Policy, 8=Excl
     N_STRAT = 9
     S_BASE, S_ALPHA, S_MVO, S_HYB, S_SMART, S_DYN, S_HEDGE, S_DD, S_EXCL = range(9)
+
+    STRATEGY_LABELS = {
+        S_BASE: 'Baseline', S_ALPHA: 'Alpha', S_MVO: 'MVO',
+        S_HYB: 'Hybrid', S_SMART: 'Smart', S_DYN: 'Dynamic',
+        S_HEDGE: 'Dyn+Hedge', S_DD: 'DD Policy', S_EXCL: 'Excl',
+    }
 
     # Static strategies rebalance on calc_dates; dynamic on triggers
     STATIC  = {S_BASE, S_ALPHA, S_MVO, S_HYB, S_SMART}
