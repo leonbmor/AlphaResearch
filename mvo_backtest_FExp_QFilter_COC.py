@@ -6488,21 +6488,40 @@ def run_backtest(
             scores['OU'] = pd.DataFrame(index=calc_dates,
                                         columns=all_tickers, dtype=float)
 
-        # SI — from si_composite_df (si_float column = short interest float %)
+        # SI — from short_interest_data, introspect column names first
         try:
             with ENGINE.connect() as conn:
-                si = pd.read_sql(text(
-                    "SELECT date, ticker, si_float FROM si_composite_df ORDER BY date"
-                ), conn)
-            si['date'] = pd.to_datetime(si['date'])
+                cols = conn.execute(text("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'short_interest_data'
+                    ORDER BY ordinal_position
+                """)).fetchall()
+            col_names = [c[0] for c in cols]
+            # Find SI float column — could be si_float, si_pct, short_interest etc.
+            si_col = next((c for c in col_names
+                          if 'float' in c.lower() or 'pct' in c.lower()
+                          or 'short' in c.lower() and 'interest' in c.lower()), None)
+            if si_col is None:
+                raise ValueError(f"No SI float column found. Columns: {col_names}")
+            with ENGINE.connect() as conn:
+                si = pd.read_sql(text(f"""
+                    SELECT date, ticker, "{si_col}" as si_val
+                    FROM short_interest_data
+                    WHERE "{si_col}" IS NOT NULL
+                    ORDER BY date
+                """), conn)
+            if si.empty:
+                raise ValueError("short_interest_data is empty")
+            si['date']   = pd.to_datetime(si['date'])
             si['ticker'] = si['ticker'].str.replace(' US', '', regex=False).str.strip()
-            si_piv  = si.pivot_table(index='date', columns='ticker',
-                                     values='si_float', aggfunc='last')
-            all_d   = calc_dates.union(si_piv.index).sort_values()
-            si_ff   = si_piv.reindex(all_d).ffill().reindex(calc_dates)
+            si_piv = si.pivot_table(index='date', columns='ticker',
+                                    values='si_val', aggfunc='last')
+            all_d  = calc_dates.union(si_piv.index).sort_values()
+            si_ff  = si_piv.reindex(all_d).ffill().reindex(calc_dates)
+            si_ff  = si_ff.reindex(columns=all_tickers)
             scores['SI'] = si_ff.apply(_mb_zscore, axis=1)
         except Exception as e:
-            print(f"  WARNING: SI scores load failed ({e})")
+            print(f"  SI scores unavailable ({e}) — will show n/a in display")
             scores['SI'] = pd.DataFrame(index=calc_dates,
                                         columns=all_tickers, dtype=float)
 
