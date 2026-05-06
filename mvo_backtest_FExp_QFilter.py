@@ -6371,7 +6371,7 @@ def run_backtest(
 
     # ── Factor exposure tracking ──────────────────────────────────────────────
     # Load all 5 factors for weighted-average exposure display and caching
-    EXPOSURE_FACTORS = ['Quality', 'Value', 'Idio_Mom', 'OU', 'SI']
+    EXPOSURE_FACTORS = ['Quality', 'Value', 'Mom_12M1', 'Idio_Mom', 'OU', 'SI']
     EXPOSURE_TBL     = 'portfolio_factor_exposures'
 
     def _ensure_exposure_table():
@@ -6383,6 +6383,7 @@ def run_backtest(
                     params_hash  VARCHAR(20)  NOT NULL,
                     quality      FLOAT,
                     value        FLOAT,
+                    mom_12m1     FLOAT,
                     idio_mom     FLOAT,
                     ou           FLOAT,
                     si           FLOAT,
@@ -6421,7 +6422,26 @@ def run_backtest(
             scores['Idio_Mom'] = pd.DataFrame(index=calc_dates,
                                               columns=all_tickers, dtype=float)
 
-        # OU
+        # Mom_12M1 — from v2_factor_residuals_mom (12M1 rolling sum)
+        try:
+            with ENGINE.connect() as conn:
+                res = pd.read_sql(text(
+                    "SELECT date, ticker, resid FROM v2_factor_residuals_mkt "
+                    "ORDER BY date"
+                ), conn)
+            res['date'] = pd.to_datetime(res['date'])
+            res_piv  = res.pivot_table(index='date', columns='ticker',
+                                       values='resid', aggfunc='last')
+            m12_raw  = res_piv.rolling(MOM_LONG, min_periods=MOM_LONG//2).sum()
+            # Skip MOM_SKIP days
+            if MOM_SKIP > 0:
+                m12_raw  = m12_raw.shift(MOM_SKIP)
+            all_d    = calc_dates.union(m12_raw.index).sort_values()
+            m12_ff   = m12_raw.reindex(all_d).ffill().reindex(calc_dates)
+            scores['Mom_12M1'] = m12_ff.apply(_mb_zscore, axis=1)
+        except Exception:
+            scores['Mom_12M1'] = pd.DataFrame(index=calc_dates,
+                                              columns=all_tickers, dtype=float)
         try:
             with ENGINE.connect() as conn:
                 ou = pd.read_sql(text(
@@ -6485,17 +6505,18 @@ def run_backtest(
             conn.execute(text(f"""
                 INSERT INTO {EXPOSURE_TBL}
                     (date, strategy, params_hash, quality, value,
-                     idio_mom, ou, si)
+                     mom_12m1, idio_mom, ou, si)
                 VALUES (:date, :strategy, :ph, :quality, :value,
-                        :idio_mom, :ou, :si)
+                        :mom_12m1, :idio_mom, :ou, :si)
                 ON CONFLICT (date, strategy, params_hash) DO UPDATE SET
                     quality=EXCLUDED.quality, value=EXCLUDED.value,
-                    idio_mom=EXCLUDED.idio_mom, ou=EXCLUDED.ou,
-                    si=EXCLUDED.si
+                    mom_12m1=EXCLUDED.mom_12m1, idio_mom=EXCLUDED.idio_mom,
+                    ou=EXCLUDED.ou, si=EXCLUDED.si
             """), {
                 'date':     dt.date(), 'strategy': strategy_name, 'ph': ph,
                 'quality':  exposures.get('Quality'),
                 'value':    exposures.get('Value'),
+                'mom_12m1': exposures.get('Mom_12M1'),
                 'idio_mom': exposures.get('Idio_Mom'),
                 'ou':       exposures.get('OU'),
                 'si':       exposures.get('SI'),
