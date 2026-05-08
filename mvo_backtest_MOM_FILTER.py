@@ -2223,7 +2223,7 @@ def run_backtest(
     else:
         calc_dates_full = calc_dates
 
-    composite_by_date, _ = _cb_build_composite_scores(
+    composite_by_date, score_dfs = _cb_build_composite_scores(
         universe        = universe,
         calc_dates      = calc_dates_full,
         Pxs_df          = Pxs_df,
