@@ -248,7 +248,7 @@ _MB_SCALAR_TBLS = {
 }
 _MB_SEC_TBL     = {'v1': 'factor_lambdas_sec',  'v2': 'v2_factor_lambdas_sec'}
 _MB_LAMBDA_META = {'intercept', 'r2', 'ridge_lambda', 'date'}
-_MB_F_LOOKBACK  = 252
+_MB_F_LOOKBACK  = 60   # months of lambda history for F matrix (5 years)
 _MB_F_EWMA_HL   = 42
 
 
@@ -880,7 +880,8 @@ def _mb_get_cached_dates(force_rebuild):
 
 def _mb_build_cov_matrices(dt, candidates, Pxs_df, sectors_s,
                              volumeTrd_df, model_version,
-                             pca_var_threshold, X_df_cached=None):
+                             pca_var_threshold, X_df_cached=None,
+                             lambda_dfs=None):
     """
     Build all four covariance matrices for the candidate universe on date dt.
     Returns (Sigma_emp, Sigma_lw, Sigma_factor, Sigma_pca, Sigma_ens).
@@ -900,8 +901,8 @@ def _mb_build_cov_matrices(dt, candidates, Pxs_df, sectors_s,
 
     # Factor-driven (self-contained -- no _mvo_factor_cov dependency)
     try:
-        F_mat, factor_names_f, sec_cols_f = _mb_build_F(model_version, dt=dt)
-        factor_names_f2, sec_cols_f2 = _mb_get_factor_names(model_version)
+        F_mat, factor_names_f, sec_cols_f = _mb_build_F(model_version, dt=dt,
+                                                         lambda_dfs=lambda_dfs)
         X_df = pd.DataFrame(0.0, index=valid, columns=factor_names_f)
         # Use most recent X snapshot if available, else build on the fly
         if X_df_cached is not None:
@@ -991,20 +992,24 @@ def _mb_zscore(s):
     return s * 0.0 if (sd == 0 or np.isnan(sd)) else (s - mu) / sd
 
 
-def _mb_get_factor_names(model_version):
+def _mb_get_factor_names(model_version, lambda_dfs=None):
+    """Return (factor_names, sec_cols). Uses pre-loaded lambda_dfs if provided."""
     scalar_names = list(_MB_SCALAR_TBLS[model_version].keys())
-    try:
-        with ENGINE.connect() as conn:
-            sdf = pd.read_sql(
-                f"SELECT * FROM {_MB_SEC_TBL[model_version]} "
-                f"ORDER BY date DESC LIMIT 1", conn
-            )
-        sec_cols = sorted([c for c in sdf.columns
-                           if c not in _MB_LAMBDA_META
-                           and pd.api.types.is_float_dtype(sdf[c])])
-    except Exception as e:
-        warnings.warn(f"Could not load sector columns: {e}")
-        sec_cols = []
+    if lambda_dfs is not None and not lambda_dfs['sector'].empty:
+        sec_cols = sorted(lambda_dfs['sector'].columns.tolist())
+    else:
+        try:
+            with ENGINE.connect() as conn:
+                sdf = pd.read_sql(
+                    f"SELECT * FROM {_MB_SEC_TBL[model_version]} "
+                    f"ORDER BY date DESC LIMIT 1", conn
+                )
+            sec_cols = sorted([c for c in sdf.columns
+                               if c not in _MB_LAMBDA_META
+                               and pd.api.types.is_float_dtype(sdf[c])])
+        except Exception as e:
+            warnings.warn(f"Could not load sector columns: {e}")
+            sec_cols = []
     head = ['Beta', 'Size']
     tail = ['Quality', 'SI', 'GK_Vol', 'Idio_Mom', 'Value', 'OU']
     factor_names = (
@@ -1027,67 +1032,85 @@ def _mb_ewma_cov_f(df, hl):
     return (d * w[:, None]).T @ d
 
 
-def _mb_build_F(model_version, dt=None):
-    """Self-contained F matrix builder — strictly point-in-time up to dt."""
+def _mb_load_lambda_dfs(model_version):
+    """Load all lambda tables into DataFrames once at startup.
+    Returns dict with keys: 'scalar' {fname: Series}, 'macro' DataFrame, 'sector' DataFrame.
+    All indexed by date (monthly cadence).
+    """
     tbls   = _MB_SCALAR_TBLS[model_version]
-    dt_str = pd.Timestamp(dt).strftime('%Y-%m-%d') if dt is not None else '9999-12-31'
-    frames = []
+    scalar = {}
     for fname, tbl in tbls.items():
         try:
             with ENGINE.connect() as conn:
-                df = pd.read_sql(
-                    f"SELECT * FROM {tbl} WHERE date <= '{dt_str}' "
-                    f"ORDER BY date DESC LIMIT {_MB_F_LOOKBACK}",
-                    conn
-                )
+                df = pd.read_sql(f"SELECT * FROM {tbl} ORDER BY date", conn)
             df['date'] = pd.to_datetime(df['date'])
             df = df.set_index('date').sort_index()
             num = df.drop(columns=[c for c in _MB_LAMBDA_META if c in df.columns],
                           errors='ignore').select_dtypes(include=np.number)
-            col = num.iloc[:, 0].rename(fname)
-            frames.append(col)
+            scalar[fname] = num.iloc[:, 0].rename(fname)
         except Exception as e:
             warnings.warn(f"Lambda table {tbl} failed: {e}")
 
-    macro_tbl_map = {'v1': 'factor_lambdas_macro', 'v2': 'v2_factor_lambdas_macro'}
+    macro_tbl = {'v1': 'factor_lambdas_macro', 'v2': 'v2_factor_lambdas_macro'}[model_version]
     try:
-        macro_tbl = macro_tbl_map[model_version]
         with ENGINE.connect() as conn:
-            mdf = pd.read_sql(
-                f"SELECT * FROM {macro_tbl} WHERE date <= '{dt_str}' "
-                f"ORDER BY date DESC LIMIT {_MB_F_LOOKBACK}",
-                conn
-            )
+            mdf = pd.read_sql(f"SELECT * FROM {macro_tbl} ORDER BY date", conn)
         mdf['date'] = pd.to_datetime(mdf['date'])
         mdf = mdf.set_index('date').sort_index()
-        mnum = mdf.drop(columns=[c for c in _MB_LAMBDA_META if c in mdf.columns],
-                        errors='ignore').select_dtypes(include=np.number)
-        for mc in MACRO_COLS:
-            if mc in mnum.columns:
-                frames.append(mnum[mc].rename(mc))
+        macro_df = mdf.drop(columns=[c for c in _MB_LAMBDA_META if c in mdf.columns],
+                            errors='ignore').select_dtypes(include=np.number)
     except Exception as e:
         warnings.warn(f"Macro lambda failed: {e}")
+        macro_df = pd.DataFrame()
 
     try:
         with ENGINE.connect() as conn:
-            sdf = pd.read_sql(
-                f"SELECT * FROM {_MB_SEC_TBL[model_version]} "
-                f"WHERE date <= '{dt_str}' "
-                f"ORDER BY date DESC LIMIT {_MB_F_LOOKBACK}", conn
-            )
+            sdf = pd.read_sql(f"SELECT * FROM {_MB_SEC_TBL[model_version]} ORDER BY date", conn)
         sdf['date'] = pd.to_datetime(sdf['date'])
         sdf = sdf.set_index('date').sort_index()
-        sec_cols = sorted([c for c in sdf.columns
-                           if c not in _MB_LAMBDA_META
-                           and pd.api.types.is_float_dtype(sdf[c])])
-        for sc in sec_cols:
-            frames.append(sdf[sc].rename(sc))
+        sec_df = sdf.drop(columns=[c for c in _MB_LAMBDA_META if c in sdf.columns],
+                          errors='ignore').select_dtypes(include=np.number)
     except Exception as e:
         warnings.warn(f"Sector lambda failed: {e}")
-        sec_cols = []
+        sec_df = pd.DataFrame()
+
+    return {'scalar': scalar, 'macro': macro_df, 'sector': sec_df}
+
+
+def _mb_build_F(model_version, dt=None, lambda_dfs=None):
+    """Build F matrix — strictly point-in-time up to dt.
+    Uses pre-loaded lambda_dfs if provided, otherwise loads from DB.
+    """
+    if lambda_dfs is None:
+        lambda_dfs = _mb_load_lambda_dfs(model_version)
+
+    cutoff = pd.Timestamp(dt) if dt is not None else pd.Timestamp('2099-12-31')
+    n      = _MB_F_LOOKBACK
+    frames = []
+
+    # Scalar factor lambdas
+    for fname, s in lambda_dfs['scalar'].items():
+        pit = s[s.index <= cutoff].tail(n)
+        if not pit.empty:
+            frames.append(pit)
+
+    # Macro lambdas
+    macro_df = lambda_dfs['macro']
+    if not macro_df.empty:
+        pit_m = macro_df[macro_df.index <= cutoff].tail(n)
+        for mc in MACRO_COLS:
+            if mc in pit_m.columns:
+                frames.append(pit_m[mc].rename(mc))
+
+    # Sector lambdas
+    sec_df = lambda_dfs['sector']
+    if not sec_df.empty:
+        pit_s = sec_df[sec_df.index <= cutoff].tail(n)
+        for sc in pit_s.columns:
+            frames.append(pit_s[sc].rename(sc))
 
     combined = pd.concat(frames, axis=1).dropna()
-    factor_names, sec_cols = _mb_get_factor_names(model_version)
+    factor_names, sec_cols = _mb_get_factor_names(model_version, lambda_dfs=lambda_dfs)
     ordered  = [c for c in factor_names if c in combined.columns]
     combined = combined[ordered]
     F        = _mb_ewma_cov_f(combined, _MB_F_EWMA_HL)
@@ -1303,7 +1326,7 @@ def _mb_clear_x_cache(model_version):
 
 def _mb_build_x_snapshots(rebal_dates, Pxs_df, sectors_s,
                             volumeTrd_df, model_version,
-                            force_rebuild):
+                            force_rebuild, lambda_dfs=None):
     """
     Build X exposure matrix snapshots with DB caching.
 
@@ -1316,7 +1339,7 @@ def _mb_build_x_snapshots(rebal_dates, Pxs_df, sectors_s,
     """
     extended_st_dt = Pxs_df.index[0]
     universe       = get_universe(Pxs_df, sectors_s, extended_st_dt)
-    factor_names, sec_cols = _mb_get_factor_names(model_version)
+    factor_names, sec_cols = _mb_get_factor_names(model_version, lambda_dfs=lambda_dfs)
 
     # All dates we need: month-ends from backtest start + latest date
     # Bound to MB_START_DATE -- no point building X before backtest begins
@@ -1798,7 +1821,7 @@ def _mb_solve_mvo(dt, candidates, composite_scores, Pxs_df, sectors_s,
                    ic, max_weight, min_weight, zscore_cap,
                    risk_aversion,
                    X_snapshots=None, snapshot_dates=None,
-                   top_n=20, min_cov_matrices=2):
+                   top_n=20, min_cov_matrices=2, lambda_dfs=None):
     """
     Exact replica of mvo_diagnostics.run_mvo_diagnostics portfolio logic:
       1. Build 4 cov matrices + ensemble
@@ -1828,9 +1851,10 @@ def _mb_solve_mvo(dt, candidates, composite_scores, Pxs_df, sectors_s,
 
     # -- Build covariance matrices ---------------------------------------------
     try:
-        valid, Sigma_emp, Sigma_lw, Sigma_factor, Sigma_pca, Sigma_ens =             _mb_build_cov_matrices(dt, valid, Pxs_df, sectors_s,
+        valid, Sigma_emp, Sigma_lw, Sigma_factor, Sigma_pca, Sigma_ens = \
+            _mb_build_cov_matrices(dt, valid, Pxs_df, sectors_s,
                                     volumeTrd_df, model_version, pca_var_threshold,
-                                    X_df_cached=X_df_cached)
+                                    X_df_cached=X_df_cached, lambda_dfs=lambda_dfs)
     except Exception as e:
         warnings.warn(f"  {dt.date()} COV MATRIX FAILED: {e}")
         return pd.Series(dtype=float), {}
@@ -2276,10 +2300,14 @@ def run_backtest(
     snapshot_dates = sorted(X_snapshots.keys())
     print(f"  X snapshots: {len(X_snapshots)} already cached  "
           f"(new ones will be built on-demand during main loop)")
+    lambda_dfs = _mb_load_lambda_dfs(model_version)
+    print(f"  Lambda tables loaded: {len(lambda_dfs['scalar'])} scalar, "
+          f"{len(lambda_dfs['macro'].columns)} macro, "
+          f"{len(lambda_dfs['sector'].columns)} sector factors")
 
     # Helper to get/build X snapshot for a given date on demand
     _x_snap_universe     = get_universe(Pxs_df, sectors_s, ext_st)
-    _x_factor_names, _x_sec_cols = _mb_get_factor_names(model_version)
+    _x_factor_names, _x_sec_cols = _mb_get_factor_names(model_version, lambda_dfs=lambda_dfs)
     _x_snap_dates_needed = set(_mb_month_end_dates(
         Pxs_df.index[Pxs_df.index >= start_date - pd.Timedelta(days=90)],
         Pxs_df.index[-1]))
@@ -2755,6 +2783,7 @@ def run_backtest(
                 zscore_cap=zscore_cap, risk_aversion=risk_aversion,
                 X_snapshots=X_snapshots, snapshot_dates=snapshot_dates,
                 top_n=top_n, min_cov_matrices=min_cov_matrices,
+                lambda_dfs=lambda_dfs,
             )
         return w[w > 1e-6] if not w.empty else w
 
