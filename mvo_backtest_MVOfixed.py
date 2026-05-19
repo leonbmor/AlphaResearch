@@ -2371,6 +2371,15 @@ def run_backtest(
     snapshot_dates = sorted(X_snapshots.keys())
     print(f"  X snapshots: {len(X_snapshots)} already cached  "
           f"(new ones will be built on-demand during main loop)")
+    if X_snapshots:
+        _sample_snap = X_snapshots[snapshot_dates[-1]]
+        _factor_names_check, _ = _mb_get_factor_names(model_version, lambda_dfs=lambda_dfs)
+        _overlap = len([c for c in _sample_snap.columns if c in _factor_names_check])
+        _pct     = _overlap / len(_factor_names_check) * 100 if _factor_names_check else 0
+        print(f"  X snapshot validation: latest={snapshot_dates[-1].date()}  "
+              f"stocks={len(_sample_snap)}  "
+              f"factor overlap={_overlap}/{len(_factor_names_check)} ({_pct:.0f}%)"
+              + ("  ✓" if _pct == 100 else "  ← STALE — run with rebuild_cov=True"))
     lambda_dfs = _mb_load_lambda_dfs(model_version)
     print(f"  Lambda tables loaded: {len(lambda_dfs['scalar'])} scalar, "
           f"{len(lambda_dfs['macro'].columns)} macro, "
@@ -2410,7 +2419,6 @@ def run_backtest(
 
     def _ensure_x_snapshot(dt):
         """Build X snapshot for the month-end prior to dt if not yet cached."""
-        # Find the most recent month-end date <= dt that we need
         needed = [d for d in _x_snap_dates_needed if d <= dt and d not in X_snapshots]
         for x_dt in sorted(needed):
             with _SuppressOutput():
@@ -2427,6 +2435,9 @@ def run_backtest(
                     _mb_save_x_snapshot(x_dt, model_version, xdf)
                 except Exception:
                     pass
+            else:
+                warnings.warn(f"  X snapshot FAILED for {x_dt.date()} "
+                              f"— MVO will use empirical cov only")
 
     # ── 3. Quality scores for baseline ───────────────────────────────────────
     print("  Loading quality scores...")
@@ -2872,8 +2883,6 @@ def run_backtest(
 
     # ── Helper: build MVO portfolio ───────────────────────────────────────────
     def _build_mvo(dt, cands, comp_scores):
-        valid_snaps = [d for d in snapshot_dates if d <= dt]
-        if not valid_snaps: return pd.Series(dtype=float)
         with _SuppressOutput():
             w, _ = _mb_solve_mvo(
                 dt=dt, candidates=cands.head(n_cands).index.tolist(),
@@ -2883,7 +2892,8 @@ def run_backtest(
                 pca_var_threshold=pca_var_threshold,
                 ic=ic, max_weight=max_weight, min_weight=min_weight,
                 zscore_cap=zscore_cap, risk_aversion=risk_aversion,
-                X_snapshots=X_snapshots, snapshot_dates=snapshot_dates,
+                X_snapshots=X_snapshots if snapshot_dates else None,
+                snapshot_dates=snapshot_dates if snapshot_dates else None,
                 top_n=top_n, min_cov_matrices=min_cov_matrices,
                 lambda_dfs=lambda_dfs,
             )
@@ -3333,7 +3343,9 @@ def run_backtest(
                     w_alpha = _build_alpha(dt, cands_alpha)
                     # MVO uses full quality-gated pool
                     w_mvo   = _build_mvo(dt, cands_mvo, comp)
-                    if w_mvo.empty: w_mvo = w_alpha.copy()
+                    if w_mvo.empty:
+                        w_mvo = w_alpha.copy()
+                        print(f"  [WARN {dt.date()}] MVO returned empty — falling back to Pure Alpha")
                     # Hybrid = blend of alpha and MVO
                     all_t   = list(set(w_alpha.index) | set(w_mvo.index))
                     w_hyb   = (w_alpha.reindex(all_t).fillna(0) +
