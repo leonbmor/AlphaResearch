@@ -207,8 +207,10 @@ def _plot_indexes(index_dict: dict, criterion: str,
                    single_stock_series: dict = None):
     """Plot all selected indexes on one chart, rebased to 100.
     If single_stock_series is provided, overlay individual stock lines."""
-    fig, ax = plt.subplots(figsize=(15, 8))
+    fig, ax = plt.subplots(figsize=(15, 10))
     colors  = plt.cm.tab10.colors
+    n_lines = len(index_dict)
+    lw      = 2.5 if n_lines == 1 else (1.8 if n_lines <= 4 else 1.2)
 
     for i, (label, idx_s) in enumerate(index_dict.items()):
         s     = idx_s.dropna()
@@ -216,7 +218,7 @@ def _plot_indexes(index_dict: dict, criterion: str,
             continue
         color = colors[i % len(colors)]
         ax.plot(s.index.to_numpy(), s.values,
-                color=color, linewidth=2.5, label=label, zorder=3)
+                color=color, linewidth=lw, label=label, zorder=3)
 
         ath      = s.max()
         current  = s.iloc[-1]
