@@ -204,7 +204,8 @@ def _build_index(tickers: list, Pxs_df: pd.DataFrame,
 
 def _plot_indexes(index_dict: dict, criterion: str,
                    weighting: str, n_years: float,
-                   single_stock_series: dict = None):
+                   single_stock_series: dict = None,
+                   single_stock_meta: dict = None):
     """Plot all selected indexes on one chart, rebased to 100.
     If single_stock_series is provided, overlay individual stock lines."""
     fig, ax = plt.subplots(figsize=(15, 10))
@@ -232,36 +233,64 @@ def _plot_indexes(index_dict: dict, criterion: str,
 
     # ── Individual stock lines (single-index mode) ────────────────────────────
     if single_stock_series:
-        stock_colors = ['#27ae60', '#82e0aa',   # top 2: dark green, light green
-                        '#e74c3c', '#f1948a']    # bottom 2: dark red, light red
-        labels_order = list(single_stock_series.keys())
-        n_stocks     = len(labels_order)
-        top_n        = n_stocks // 2
+        stock_mode   = single_stock_meta.get('mode', 'top_bottom')
+        n_stocks     = len(single_stock_series)
 
-        for j, ticker in enumerate(labels_order):
-            s     = single_stock_series[ticker].dropna()
-            if s.empty:
-                continue
-            is_top  = j < top_n
-            color   = stock_colors[j % len(stock_colors)]
-            ax.plot(s.index.to_numpy(), s.values,
-                    color=color, linewidth=1.1,
-                    linestyle='-',
-                    alpha=0.85,
-                    label=f"{'▲' if is_top else '▼'} {ticker}",
-                    zorder=2)
-            ath      = s.max()
-            current  = s.iloc[-1]
-            pct_diff = (current / ath - 1) * 100
-            ax.annotate(
-                f"{ticker}  {pct_diff:.1f}%",
-                xy=(s.index[-1], current),
-                xytext=(6, 0), textcoords='offset points',
-                fontsize=7.5, color=color, va='center',
-            )
+        if stock_mode == 'all':
+            # All stocks: use tab20 for maximum distinctiveness
+            all_colors = plt.cm.tab20.colors
+            for j, (ticker, s) in enumerate(single_stock_series.items()):
+                s = s.dropna()
+                if s.empty: continue
+                color = all_colors[j % len(all_colors)]
+                ax.plot(s.index.to_numpy(), s.values,
+                        color=color, linewidth=0.9, linestyle='-',
+                        alpha=0.75, label=ticker, zorder=2)
+                ath      = s.max()
+                current  = s.iloc[-1]
+                pct_diff = (current / ath - 1) * 100
+                ax.annotate(f"{ticker}  {pct_diff:.1f}%",
+                            xy=(s.index[-1], current),
+                            xytext=(6, 0), textcoords='offset points',
+                            fontsize=7, color=color, va='center')
+        else:
+            # Top/bottom: greens for top, reds for bottom
+            n_each  = n_stocks // 2
+            # Green palette (top performers)
+            greens  = ['#1a7a1a', '#2ecc71', '#27ae60', '#82e0aa',
+                       '#a9dfbf', '#d5f5e3'][:n_each]
+            # Red palette (bottom performers)
+            reds    = ['#922b21', '#e74c3c', '#c0392b', '#f1948a',
+                       '#f5b7b1', '#fdedec'][:n_each]
+            colors_ordered = greens + reds
+
+            for j, (ticker, s) in enumerate(single_stock_series.items()):
+                s = s.dropna()
+                if s.empty: continue
+                is_top  = j < n_each
+                color   = colors_ordered[j % len(colors_ordered)]
+                ax.plot(s.index.to_numpy(), s.values,
+                        color=color, linewidth=1.1, linestyle='-',
+                        alpha=0.85,
+                        label=f"{'▲' if is_top else '▼'} {ticker}",
+                        zorder=2)
+                ath      = s.max()
+                current  = s.iloc[-1]
+                pct_diff = (current / ath - 1) * 100
+                ax.annotate(f"{ticker}  {pct_diff:.1f}%",
+                            xy=(s.index[-1], current),
+                            xytext=(6, 0), textcoords='offset points',
+                            fontsize=7.5, color=color, va='center')
 
     weight_str = "Equal Weight" if weighting == 'equal' else "Market Cap Weight"
-    suffix     = "  |  top/bottom 2 stocks shown" if single_stock_series else ""
+    if single_stock_series and single_stock_meta:
+        mode = single_stock_meta.get('mode', 'top_bottom')
+        n    = single_stock_meta.get('n', 2)
+        suffix = (f"  |  all {len(single_stock_series)} stocks shown"
+                  if mode == 'all'
+                  else f"  |  top/bottom {n} stocks shown")
+    else:
+        suffix = ""
     ax.set_title(f"{criterion} — {weight_str} Indexes  "
                  f"({n_years:.0f}Y, base=100){suffix}",
                  fontsize=14, fontweight='bold', pad=12)
@@ -370,34 +399,38 @@ def _prompt_years() -> float:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def _get_top_bottom_stocks(tickers: list, Pxs_df: pd.DataFrame,
-                            cutoff: pd.Timestamp, n: int = 2) -> dict:
+                            cutoff: pd.Timestamp, n: int = 2) -> tuple:
     """
-    Return normalised-to-100 price series for the top n and bottom n
-    performers in the group over the period starting at cutoff.
-    Returns dict ordered: [top n (best first), bottom n (worst first)].
+    Return (series_dict, mode) where:
+    - mode='top_bottom': dict ordered [top n (best→worst), bottom n (worst→best)]
+    - mode='all':        all stocks individually (when sector has < 2*n stocks)
+    All series normalised to 100 at start of period.
     """
     valid = [t for t in tickers if t in Pxs_df.columns]
     px    = Pxs_df[valid].loc[Pxs_df.index >= cutoff].dropna(how='all')
     if px.empty:
-        return {}
+        return {}, 'top_bottom'
 
-    # Normalise each stock to 100 at first valid price
     normed = px.apply(lambda s: s / s.dropna().iloc[0] * 100
                       if s.dropna().size > 0 else s)
-
-    # Use last valid value per stock (ffill handles today having no price yet)
     final  = normed.ffill().iloc[-1].dropna()
     if final.empty:
-        return {}
+        return {}, 'top_bottom'
+
+    # If too few stocks to split, plot all
+    if len(final) < 2 * n:
+        result = {t: normed[t].dropna()
+                  for t in final.sort_values(ascending=False).index}
+        return result, 'all'
+
     top    = final.nlargest(n).index.tolist()
     bottom = final.nsmallest(n).index.tolist()
-
     result = {}
     for t in top:
         result[t] = normed[t].dropna()
     for t in bottom:
         result[t] = normed[t].dropna()
-    return result
+    return result, 'top_bottom'
 
 
 def main(Pxs_df: pd.DataFrame, Sectors_df: pd.DataFrame):
@@ -458,23 +491,44 @@ def main(Pxs_df: pd.DataFrame, Sectors_df: pd.DataFrame):
         print("No valid indexes to plot.")
         return
 
-    print(f"\n  index_dict size: {len(index_dict)}  keys: {list(index_dict.keys())}")
-
-    # ── Single-index mode: overlay top/bottom 2 individual stocks ────────────
+    # ── Single-index mode: overlay top/bottom N individual stocks ────────────
     single_stock_series = None
+    single_stock_meta   = None
     if len(index_dict) == 1:
-        lbl      = list(index_dict.keys())[0]
-        tickers  = [t for t in mapping[mapping == lbl].index
-                    if t in Pxs_df.columns]
-        print(f"  Single group selected — computing top/bottom 2 stocks "
-              f"({len(tickers)} tickers)...")
-        single_stock_series = _get_top_bottom_stocks(tickers, Pxs_df,
-                                                      cutoff, n=2)
-        print(f"  single_stock_series keys: {list(single_stock_series.keys())}")
-        if not single_stock_series:
-            print("  Warning: _get_top_bottom_stocks returned empty — no stocks to overlay")
+        lbl     = list(index_dict.keys())[0]
+        tickers = [t for t in mapping[mapping == lbl].index
+                   if t in Pxs_df.columns]
 
-    _plot_indexes(index_dict, criterion, weighting, n_years, single_stock_series)
+        # Prompt for N
+        while True:
+            raw = input(f"\n  Top/bottom N stocks to show (1-6) [default=3]: ").strip()
+            if raw == '':
+                n_show = 3; break
+            try:
+                n_show = int(raw)
+                if 1 <= n_show <= 6: break
+                print("  Enter a number between 1 and 6")
+            except ValueError:
+                print("  Enter a number")
+
+        print(f"  Computing top/bottom {n_show} stocks "
+              f"({len(tickers)} in group)...")
+        single_stock_series, mode = _get_top_bottom_stocks(
+            tickers, Pxs_df, cutoff, n=n_show
+        )
+        single_stock_meta = {'mode': mode, 'n': n_show}
+        if mode == 'all':
+            print(f"  Group has < {2*n_show} stocks — plotting all "
+                  f"{len(single_stock_series)} individually")
+        else:
+            top2    = list(single_stock_series.keys())[:n_show]
+            bottom2 = list(single_stock_series.keys())[n_show:]
+            print(f"  Top {n_show}   : {top2}")
+            print(f"  Bottom {n_show} : {bottom2}")
+        print(f"  single_stock_series keys: {list(single_stock_series.keys())}")
+
+    _plot_indexes(index_dict, criterion, weighting, n_years,
+                  single_stock_series, single_stock_meta)
 
 
 if __name__ == "__main__":
