@@ -3254,6 +3254,12 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
             if c in lam_sec.columns:
                 rows_snap.append((f'Sector: {c}', lam_sec.loc[dt, c] * 100))
 
+    # ── Sub-sector lambda rows ────────────────────────────────────────────────
+    if not lam_subsec.empty and dt in lam_subsec.index:
+        for c in subsec_cols:
+            if c in lam_subsec.columns:
+                rows_snap.append((f'SubSec: {c}', lam_subsec.loc[dt, c] * 100))
+
     ridge_str = ''
     for ldf, label in [(lam_macro, 'Macro'), (lam_sec, 'Sec'), (lam_subsec, 'SubSec')]:
         if ldf is not None and not ldf.empty \
@@ -3270,19 +3276,28 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
         else 0.0
         for ldf in [lam_mkt, lam_quality, lam_mom, lam_size,
                     lam_value, lam_si, lam_vol, lam_macro,
-                    lam_sec, lam_ou]
+                    lam_sec, lam_ou, lam_subsec]
     )
 
-    # ── Daily R² ─────────────────────────────────────────────────────────────
-    r2_consolidated = np.nan
-    if not r_ou.empty and dt in r_ou.index and dt in all_rets.index:
-        ou_res = r_ou.loc[dt].dropna()
-        raw_r  = all_rets.loc[dt, ou_res.index].dropna()
-        idx    = ou_res.index.intersection(raw_r.index)
-        if len(idx) > 1:
-            r2_consolidated = 1.0 - ou_res[idx].var() / raw_r[idx].var()
+    # ── Daily R²: before sub-sectors (after O-U) and after sub-sectors ───────
+    def _r2(resid_df, raw_df, date):
+        if resid_df.empty or date not in resid_df.index or date not in raw_df.index:
+            return np.nan
+        res = resid_df.loc[date].dropna()
+        raw = raw_df.loc[date, res.index].dropna()
+        idx = res.index.intersection(raw.index)
+        if len(idx) < 2:
+            return np.nan
+        return 1.0 - res[idx].var() / raw[idx].var()
 
-    r2_str = f"{r2_consolidated*100:.2f}%" if not np.isnan(r2_consolidated) else "n/a"
+    r2_ou_val     = _r2(r_ou,     all_rets, dt)
+    r2_subsec_val = _r2(r_subsec, all_rets, dt) if not r_subsec.empty else np.nan
+
+    r2_ou_str     = f"{r2_ou_val*100:.2f}%"     if not np.isnan(r2_ou_val)     else "n/a"
+    r2_subsec_str = f"{r2_subsec_val*100:.2f}%"  if not np.isnan(r2_subsec_val) else "n/a"
+    r2_str        = (f"{r2_ou_str} → {r2_subsec_str} (+sub-sec)"
+                     if not np.isnan(r2_subsec_val)
+                     else r2_ou_str)
 
     W = 38
     print(f"\n  {'='*(W+14)}")
@@ -3297,13 +3312,13 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
 
     return {
         'dt': dt, 'universe': universe,
-        'sec_cols': sec_cols, 'macro_cols': macro_cols,
+        'sec_cols': sec_cols, 'macro_cols': macro_cols, 'subsec_cols': subsec_cols,
         'lambda_mkt': lam_mkt, 'lambda_quality': lam_quality,
         'lambda_mom': lam_mom, 'lambda_size': lam_size,
         'lambda_value': lam_value, 'lambda_si': lam_si,
         'lambda_vol': lam_vol, 'lambda_macro': lam_macro,
-        'lambda_sec': lam_sec, 'lambda_ou': lam_ou,
-        'resid_ou': r_ou, 'ou_pivot': ou_pivot,
+        'lambda_sec': lam_sec, 'lambda_ou': lam_ou, 'lambda_subsec': lam_subsec,
+        'resid_ou': r_ou, 'resid_subsec': r_subsec, 'ou_pivot': ou_pivot,
     }
 
 
@@ -3323,6 +3338,8 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
         sectors_s = sectors_s['sector'].copy()
 
     sectors_s = sectors_s[~sectors_s.index.duplicated(keep='first')]
+
+    all_dates      = Pxs_df.index
     st_dt_loc      = all_dates.searchsorted(st_dt)
     ext_loc        = max(0, st_dt_loc - MOM_LONG_BUFFER)
     extended_st_dt = all_dates[ext_loc]
@@ -3359,6 +3376,18 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
     )
     valid_ext  = ext_dates[valid_ext_mask]
     valid_days = valid_ext[valid_ext >= st_dt]
+
+    # Diagnostic: show non-stale counts at first few dates failing the mask
+    failing = ext_dates[~valid_ext_mask]
+    if len(failing) > 0:
+        print(f"  [DIAG] valid_ext ends at: {valid_ext[-1].date() if len(valid_ext) else 'EMPTY'}")
+        print(f"  [DIAG] Pxs_df last date: {ext_dates[-1].date()}")
+        print(f"  [DIAG] {len(failing)} dates failed stale check (MIN_STOCKS={MIN_STOCKS})")
+        sample_failing = failing[:3].tolist() + failing[-3:].tolist()
+        for d in sorted(set(sample_failing)):
+            cnt   = _non_stale_count(d)
+            n_nan = int(all_rets.loc[d].isna().sum()) if d in all_rets.index else -1
+            print(f"    {d.date()}  non_stale={cnt}  nan_stocks={n_nan}")
     print(f"  Extended dates: {len(valid_ext)} | Valid dates: {len(valid_days)}")
     if len(valid_days) > 0:
         print(f"  First valid date: {valid_days[0].date()}")
