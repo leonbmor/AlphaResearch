@@ -68,6 +68,8 @@ MOM_SKIP          = 21
 MOM_LONG_BUFFER   = MOM_LONG
 RIDGE_GRID_MACRO  = [0.15, 0.3, 0.75, 1.5, 3.0, 5.0, 10.0, 20.0, 40.0]
 RIDGE_GRID_SEC    = [0.1, 0.2, 0.4, 0.75, 1.5, 3.0, 5.0, 10.0, 20.0, 40.0]
+RIDGE_GRID_SUBSEC = RIDGE_GRID_SEC   # same grid for sub-sector dummies
+SUBSEC_MIN_STOCKS = 5                # minimum stocks in a sub-sector to include dummy
 MIN_STOCKS        = 150
 SI_COMPOSITE_TBL  = 'si_composite_df'
 SI_HORIZON        = 21
@@ -100,6 +102,7 @@ V2_RESID_SI      = v2tbl('factor_residuals_si')
 V2_RESID_VOL     = v2tbl('factor_residuals_vol')
 V2_RESID_MACRO   = v2tbl('factor_residuals_macro')
 V2_RESID_SEC     = v2tbl('factor_residuals_sec')
+V2_RESID_SUBSEC  = v2tbl('factor_residuals_subsec')
 V2_RESID_OU      = v2tbl('factor_residuals_ou')
 V2_LAM_MKT       = v2tbl('lambda_mkt')
 V2_LAM_QUALITY   = v2tbl('lambda_quality')
@@ -110,6 +113,7 @@ V2_LAM_SI        = v2tbl('lambda_si')
 V2_LAM_VOL       = v2tbl('lambda_vol')
 V2_LAM_MACRO     = v2tbl('lambda_macro')
 V2_LAM_SEC       = v2tbl('lambda_sec')
+V2_LAM_SUBSEC    = v2tbl('lambda_subsec')
 V2_LAM_OU        = v2tbl('lambda_ou')
 V2_OU_TBL        = v2tbl('ou_reversion_df')
 
@@ -425,6 +429,38 @@ def build_sector_dummies(universe: list, sectors_s: pd.Series) -> pd.DataFrame:
 
     print(f"  Sector dummies: {K} sectors (sum-to-zero deviation coding, "
           f"no reference sector dropped)")
+    return dummies
+
+
+def build_subsector_dummies(universe: list, subsec_s: pd.Series,
+                            min_stocks: int = SUBSEC_MIN_STOCKS) -> pd.DataFrame:
+    """
+    Build sub-sector dummy matrix using sum-to-zero (deviation) coding.
+    Same encoding as build_sector_dummies. Sub-sectors with fewer than
+    min_stocks members are excluded from the dummy matrix.
+    """
+    subsec_dedup = subsec_s[~subsec_s.index.duplicated(keep='first')]
+    # Count stocks per sub-sector (restricted to universe)
+    in_univ = subsec_dedup.loc[subsec_dedup.index.isin(universe)].dropna()
+    counts  = in_univ.value_counts()
+    valid   = sorted(counts[counts >= min_stocks].index.tolist())
+    K       = len(valid)
+
+    if K == 0:
+        print(f"  Sub-sector dummies: no sub-sectors with >= {min_stocks} stocks")
+        return pd.DataFrame(index=universe)
+
+    fill_val = -1.0 / (K - 1) if K > 1 else 0.0
+    dummies  = pd.DataFrame(fill_val, index=universe, columns=valid)
+    for stk in universe:
+        ss = subsec_dedup.get(stk)
+        if ss is not None and ss in valid:
+            dummies.loc[stk, ss] = 1.0
+
+    n_excluded = counts[counts < min_stocks].shape[0]
+    print(f"  Sub-sector dummies: {K} sub-sectors included  "
+          f"({n_excluded} excluded, < {min_stocks} stocks)  "
+          f"sum-to-zero deviation coding")
     return dummies
 
 
@@ -2881,6 +2917,14 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
     print(f"\n  v2 incremental update for {dt.date()}")
 
     Pxs_df    = Pxs_df.loc[:, ~Pxs_df.columns.duplicated(keep='first')]
+
+    # Defensive: accept sectors_df (DataFrame) or sectors_s (Series)
+    if isinstance(sectors_s, pd.DataFrame):
+        _v2_run_incremental._subsec_s = sectors_s['sub_sector'].copy() \
+            if 'sub_sector' in sectors_s.columns else \
+            getattr(_v2_run_incremental, '_subsec_s', None)
+        sectors_s = sectors_s['sector'].copy()
+
     sectors_s = sectors_s[~sectors_s.index.duplicated(keep='first')]
 
     st_dt          = FM_START_DATE   # respects global start date setting
@@ -3030,12 +3074,19 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
         r_si, dynamic_size, calc_dates, universe
     )
 
-    # ── Step 9: Macro — raw betas to vol residuals, joint Ridge ───────────────
-    # For incremental, macro betas are computed against Pxs_df (approximation)
-    # Full recalc computes them against the actual vol residuals
+    # ── Step 9: Macro ⊥ {all prior style factors}, joint Ridge ──────────────
+    prior_for_macro_incr = dict(prior_for_vol)
+    prior_for_macro_incr['vol'] = vol_perp
+
+    macro_betas_perp = {}
     if macro_cols:
+        for col in macro_cols:
+            macro_betas_perp[col] = orthogonalize_char_df(
+                macro_betas[col], prior_for_macro_incr,
+                calc_dates, dynamic_size=dynamic_size
+            )
         r_macro, lam_macro, _ = run_factor_step_optimal_ridge(
-            macro_cols, macro_betas,
+            macro_cols, macro_betas_perp,
             r_vol, dynamic_size, calc_dates, universe,
             lambda_grid=RIDGE_GRID_MACRO, default_lambda=0.5
         )
@@ -3043,9 +3094,21 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
         r_macro  = r_vol
         lam_macro = pd.DataFrame()
 
-    # ── Step 10: Sectors — sum-to-zero dummies, Ridge ─────────────────────────
+    # ── Step 10: Sectors ⊥ {all prior}, Ridge ────────────────────────────────
+    prior_for_sec_incr = dict(prior_for_macro_incr)
+    for col in macro_cols:
+        prior_for_sec_incr[col] = macro_betas_perp.get(col, macro_betas.get(col))
+    prior_for_sec_incr = {k: v for k, v in prior_for_sec_incr.items()
+                          if v is not None}
+
+    sec_char_perp = {}
+    for col in sec_cols:
+        sec_char_perp[col] = orthogonalize_char_df(
+            sec_char[col], prior_for_sec_incr,
+            calc_dates, dynamic_size=dynamic_size
+        )
     r_sec, lam_sec, _ = run_factor_step_optimal_ridge(
-        sec_cols, {c: sec_char[c] for c in sec_cols},
+        sec_cols, sec_char_perp,
         r_macro, dynamic_size, calc_dates, universe,
         lambda_grid=RIDGE_GRID_SEC, default_lambda=2.0
     )
@@ -3090,6 +3153,48 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
             r_sec, dynamic_size, calc_dates, universe
         )
 
+    # ── Step 12: Sub-sector Dummies (incremental) ─────────────────────────────
+    subsec_s_incr  = getattr(_v2_run_incremental, '_subsec_s', None)
+    r_subsec       = pd.DataFrame()
+    lam_subsec     = pd.DataFrame()
+    subsec_cols    = []
+
+    if subsec_s_incr is not None:
+        subsec_dum  = build_subsector_dummies(universe, subsec_s_incr)
+        subsec_cols = subsec_dum.columns.tolist()
+        if subsec_cols:
+            subsec_char_dt = {col: pd.DataFrame(
+                {dt2: subsec_dum[col] for dt2 in calc_dates}
+            ).T for col in subsec_cols}
+
+            prior_incr = {
+                'beta': beta_df, 'quality': quality_perp,
+                'idio_mom': mom_perp, 'size': size_perp,
+                'value': value_perp, 'si_composite': si_perp,
+                'vol': vol_perp,
+            }
+            for col in macro_cols:
+                prior_incr[col] = macro_betas_perp.get(col, macro_betas.get(col))
+            for col in sec_cols:
+                prior_incr[col] = sec_char_perp[col]
+            prior_incr['ou_reversion'] = ou_pivot
+            prior_incr = {k: v for k, v in prior_incr.items() if v is not None}
+
+            subsec_char_perp = {}
+            for col in subsec_cols:
+                subsec_char_perp[col] = orthogonalize_char_df(
+                    subsec_char_dt[col], prior_incr,
+                    calc_dates, dynamic_size=dynamic_size
+                )
+            base_for_subsec = r_ou if not r_ou.empty else r_sec
+            r_subsec, lam_subsec, _ = run_factor_step_optimal_ridge(
+                subsec_cols, subsec_char_perp,
+                base_for_subsec, dynamic_size, calc_dates, universe,
+                lambda_grid=RIDGE_GRID_SUBSEC, default_lambda=2.0
+            )
+    else:
+        lam_subsec = pd.DataFrame()
+
     # ── Save to DB ────────────────────────────────────────────────────────────
     print("  Saving v2 results to DB...")
     lam_pairs = [
@@ -3103,6 +3208,7 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
         (lam_macro,   V2_LAM_MACRO) if macro_cols else (None, None),
         (lam_sec,     V2_LAM_SEC),
         (lam_ou,      V2_LAM_OU),
+        (lam_subsec,  V2_LAM_SUBSEC) if subsec_cols and not lam_subsec.empty else (None, None),
     ]
     for ldf, tbl in lam_pairs:
         if ldf is not None and tbl is not None:
@@ -3119,6 +3225,7 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
         (r_macro,   V2_RESID_MACRO) if macro_cols else (None, None),
         (r_sec,     V2_RESID_SEC),
         (r_ou,      V2_RESID_OU),
+        (r_subsec,  V2_RESID_SUBSEC) if subsec_cols and not r_subsec.empty else (None, None),
     ]
     for rdf, tbl in resid_pairs:
         if rdf is not None and tbl is not None and not rdf.empty:
@@ -3148,8 +3255,9 @@ def _v2_run_incremental(Pxs_df, sectors_s, volumeTrd_df=None,
                 rows_snap.append((f'Sector: {c}', lam_sec.loc[dt, c] * 100))
 
     ridge_str = ''
-    for ldf, label in [(lam_macro, 'Macro'), (lam_sec, 'Sec')]:
-        if ldf is not None and not ldf.empty                 and 'ridge_lambda' in ldf.columns and dt in ldf.index:
+    for ldf, label in [(lam_macro, 'Macro'), (lam_sec, 'Sec'), (lam_subsec, 'SubSec')]:
+        if ldf is not None and not ldf.empty \
+                and 'ridge_lambda' in ldf.columns and dt in ldf.index:
             rl = ldf.loc[dt, 'ridge_lambda']
             if not np.isnan(rl):
                 ridge_str += f'   {label} Ridge λ: {rl:.2f}'
@@ -3207,7 +3315,14 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
                   use_vol_scale=False, VOL_LOWER=0.5, VOL_UPPER=3.0):
     """Full recalculation for v2 model."""
 
-    all_dates      = Pxs_df.index
+    # Defensive: accept sectors_df (DataFrame) or sectors_s (Series)
+    if isinstance(sectors_s, pd.DataFrame):
+        _v2_run_full._subsec_s = sectors_s['sub_sector'].copy() \
+            if 'sub_sector' in sectors_s.columns else \
+            getattr(_v2_run_full, '_subsec_s', None)
+        sectors_s = sectors_s['sector'].copy()
+
+    sectors_s = sectors_s[~sectors_s.index.duplicated(keep='first')]
     st_dt_loc      = all_dates.searchsorted(st_dt)
     ext_loc        = max(0, st_dt_loc - MOM_LONG_BUFFER)
     extended_st_dt = all_dates[ext_loc]
@@ -3495,21 +3610,15 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
         ]), universe
     )
 
-    # ── Step 9: Macro — raw betas to vol residuals, joint Ridge ───────────────
+    # ── Step 9: Macro ⊥ {all prior}, joint Ridge ─────────────────────────────
     print("\n" + "="*70)
-    print("  STEP 9: Macro Factors (raw betas to vol residuals, joint Ridge)")
+    print("  STEP 9: Macro Factors (orthogonalized vs all prior, joint Ridge)")
     print("="*70)
-    # Recompute macro betas against vol residuals (true v2 design)
     print("  Computing macro betas against vol residuals...")
     macro_betas_v2 = calc_macro_betas(
         Pxs_df, universe,
         resid_vol_full.index
     )
-    # Note: calc_macro_betas uses Pxs_df macro columns as factors but
-    # stock returns are approximated by Pxs_df returns. For the full
-    # Gram-Schmidt spirit, macro betas should be vs the vol residuals.
-    # We achieve this by passing resid_vol as the return series implicitly
-    # via the run_factor_step call — the regression target is resid_vol_full.
     macro_cols_v2 = list(macro_betas_v2.keys())
 
     if macro_cols_v2:
@@ -3518,8 +3627,20 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
             full_dates_macro = full_dates_macro.intersection(
                 macro_betas_v2[col].index
             )
+        # Build prior dict for macro orthogonalization — all style factors
+        prior_for_macro = dict(prior_for_vol)
+        prior_for_macro['vol'] = vol_perp_full
+
+        print("  Orthogonalizing macro betas vs all prior style factors...")
+        macro_betas_perp = {}
+        for col in macro_cols_v2:
+            macro_betas_perp[col] = orthogonalize_char_df(
+                macro_betas_v2[col], prior_for_macro,
+                full_dates_macro, dynamic_size=dynamic_size
+            )
+
         resid_macro_full, lambda_macro, r2_macro = run_factor_step_optimal_ridge(
-            macro_cols_v2, macro_betas_v2,
+            macro_cols_v2, macro_betas_perp,
             resid_vol_full, dynamic_size,
             full_dates_macro, universe,
             lambda_grid=RIDGE_GRID_MACRO, default_lambda=0.5
@@ -3529,13 +3650,29 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
         lambda_macro     = pd.DataFrame()
         r2_macro         = pd.Series(dtype=float)
         macro_cols_v2    = []
+        prior_for_macro  = dict(prior_for_vol)
+        prior_for_macro['vol'] = vol_perp_full
 
-    # ── Step 10: Sectors — sum-to-zero dummies, Ridge ─────────────────────────
+    # ── Step 10: Sectors ⊥ {all prior}, Ridge ────────────────────────────────
     print("\n" + "="*70)
-    print("  STEP 10: Sector Dummies (sum-to-zero, Ridge)")
+    print("  STEP 10: Sector Dummies (orthogonalized vs all prior, Ridge)")
     print("="*70)
+    # Prior for sectors = all style factors + orthogonalized macro betas
+    prior_for_sec = dict(prior_for_macro)
+    for col in macro_cols_v2:
+        prior_for_sec[col] = macro_betas_perp[col] if macro_cols_v2 else None
+    prior_for_sec = {k: v for k, v in prior_for_sec.items() if v is not None}
+
+    print("  Orthogonalizing sector dummies vs all prior...")
+    sec_char_perp = {}
+    for col in sec_cols:
+        sec_char_perp[col] = orthogonalize_char_df(
+            sec_char[col], prior_for_sec,
+            resid_macro_full.index, dynamic_size=dynamic_size
+        )
+
     resid_sec_full, lambda_sec, r2_sec = run_factor_step_optimal_ridge(
-        sec_cols, {c: sec_char[c] for c in sec_cols},
+        sec_cols, sec_char_perp,
         resid_macro_full, dynamic_size,
         resid_macro_full.index, universe,
         lambda_grid=RIDGE_GRID_SEC, default_lambda=2.0
@@ -3637,6 +3774,56 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
         ou_common, universe
     )
 
+    # ── Step 12: Sub-sector Dummies ⊥ {all prior}, Ridge ─────────────────────
+    subsec_s       = getattr(_v2_run_full, '_subsec_s', None)
+    resid_subsec_full  = pd.DataFrame()
+    lambda_subsec      = pd.DataFrame()
+    r2_subsec          = pd.Series(dtype=float)
+    subsec_cols        = []
+
+    if subsec_s is not None:
+        print("\n" + "="*70)
+        print("  STEP 12: Sub-sector Dummies (orthogonalized vs all prior, Ridge)")
+        print("="*70)
+        subsec_dum  = build_subsector_dummies(universe, subsec_s)
+        subsec_cols = subsec_dum.columns.tolist()
+
+        if subsec_cols:
+            # Expand sub-sector dummies to date index
+            subsec_char = {col: pd.DataFrame(
+                {dt: subsec_dum[col] for dt in common_dates}
+            ).T for col in subsec_cols}
+
+            # Prior dict = all preceding factors including OU
+            prior_for_subsec = dict(prior_for_sec)
+            for col in macro_cols_v2:
+                prior_for_subsec[col] = macro_betas_perp[col]
+            for col in sec_cols:
+                prior_for_subsec[col] = sec_char_perp[col]
+            prior_for_subsec['ou_reversion'] = ou_pivot
+
+            print("  Orthogonalizing sub-sector dummies vs all prior "
+                  f"({len(prior_for_subsec)} factors)...")
+            subsec_char_perp = {}
+            for col in subsec_cols:
+                subsec_char_perp[col] = orthogonalize_char_df(
+                    subsec_char[col], prior_for_subsec,
+                    resid_ou.index if not resid_ou.empty else common_dates,
+                    dynamic_size=dynamic_size
+                )
+
+            resid_subsec_full, lambda_subsec, r2_subsec = \
+                run_factor_step_optimal_ridge(
+                    subsec_cols, subsec_char_perp,
+                    resid_ou if not resid_ou.empty else resid_sec_full,
+                    dynamic_size,
+                    resid_ou.index if not resid_ou.empty else common_dates,
+                    universe,
+                    lambda_grid=RIDGE_GRID_SUBSEC, default_lambda=2.0
+                )
+        else:
+            print("  No valid sub-sectors — Step 12 skipped")
+
     # ── Restrict early residuals to common sample for variance stats ──────────
     def _cs(df):
         return df[df.index.isin(common_dates)] if not df.empty else df
@@ -3665,6 +3852,8 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
     macro_UFV   = variance_stats(resid_macro,   "macro_UFV   (+macro)",    vol_UFV)                   if macro_cols_v2 else vol_UFV
     sec_UFV     = variance_stats(resid_sec,     "sec_UFV     (+sectors)",  macro_UFV)
     ou_UFV      = variance_stats(resid_ou,      "ou_UFV      (+O-U)",      sec_UFV)                   if not resid_ou.empty else sec_UFV
+    resid_subsec = _cs(resid_subsec_full) if not resid_subsec_full.empty else pd.DataFrame()
+    subsec_UFV  = variance_stats(resid_subsec,  "subsec_UFV  (+sub-sec)",  ou_UFV)                    if not resid_subsec.empty else ou_UFV
 
     print(f"\n  {'Step':<44} {'%UFV':>8} {'%prev':>8}")
     print(f"  {'-'*62}")
@@ -3680,6 +3869,7 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
         ("+ Macro",              macro_UFV,   UFV,         vol_UFV),
         ("+ Sectors",            sec_UFV,     UFV,         macro_UFV),
         ("+ O-U",                ou_UFV,      UFV,         sec_UFV),
+        ("+ Sub-sectors",        subsec_UFV,  UFV,         ou_UFV),
     ]:
         pct_ufv  = f"{var/base*100:.2f}%"
         pct_prev = f"{var/prev*100:.2f}%" if prev else "---"
@@ -3703,6 +3893,10 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
         save_lambdas(
             lambda_macro[lambda_macro.index.isin(common_dates)], V2_LAM_MACRO
         )
+    if subsec_cols and not lambda_subsec.empty:
+        save_lambdas(
+            lambda_subsec[lambda_subsec.index.isin(common_dates)], V2_LAM_SUBSEC
+        )
 
     for rdf, tbl in [
         (resid_mkt_full,     V2_RESID_MKT),
@@ -3718,6 +3912,8 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
         save_residuals(rdf, tbl)
     if macro_cols_v2:
         save_residuals(resid_macro_full, V2_RESID_MACRO)
+    if subsec_cols and not resid_subsec_full.empty:
+        save_residuals(resid_subsec_full, V2_RESID_SUBSEC)
 
     r2_stats(r2_mkt[r2_mkt.index.isin(common_dates)],             "Step 2: Beta")
     r2_stats(r2_quality[r2_quality.index.isin(common_dates)],     "Step 3: Quality")
@@ -3730,6 +3926,8 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
         r2_stats(r2_macro[r2_macro.index.isin(common_dates)],     "Step 9: Macro")
     r2_stats(r2_sec[r2_sec.index.isin(common_dates)],             "Step 10: Sectors")
     r2_stats(r2_ou,                                                "Step 11: O-U")
+    if subsec_cols:
+        r2_stats(r2_subsec,                                        "Step 12: Sub-sectors")
 
     print_lambda_summary(lambda_mkt,     ['beta'],       "Step 2: Beta",        common_dates)
     print_lambda_summary(lambda_quality, ['quality'],    "Step 3: Quality",     common_dates, annual_col='quality')
@@ -3743,6 +3941,8 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
     print_lambda_summary(lambda_sec,     sec_cols,       "Step 10: Sectors",    common_dates)
     print_sector_lambdas(lambda_sec, sec_cols, common_dates)
     print_lambda_summary(lambda_ou,      ['ou_reversion'],"Step 11: O-U",       ou_common, annual_col='ou_reversion')
+    if subsec_cols and not lambda_subsec.empty:
+        print_lambda_summary(lambda_subsec, subsec_cols,  "Step 12: Sub-sectors", common_dates)
 
     return {
         'UFV': UFV, 'mkt_UFV': mkt_UFV, 'quality_UFV': quality_UFV,
@@ -3763,11 +3963,13 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
         'resid_vol_full': resid_vol_full,
         'resid_macro_full': resid_macro_full if macro_cols_v2 else resid_vol_full,
         'resid_sec_full': resid_sec_full,
+        'resid_subsec_full': resid_subsec_full,
         'lambda_mkt': lambda_mkt, 'lambda_quality': lambda_quality,
         'lambda_mom': lambda_mom, 'lambda_size': lambda_size,
         'lambda_value': lambda_value, 'lambda_si': lambda_si,
         'lambda_vol': lambda_vol, 'lambda_macro': lambda_macro,
         'lambda_sec': lambda_sec, 'lambda_ou': lambda_ou,
+        'lambda_subsec': lambda_subsec,
         'beta_df': beta_df, 'size_char_df': size_char_df,
         'quality_perp': quality_perp, 'mom_perp': mom_perp,
         'size_perp': size_perp, 'value_perp': value_perp,
@@ -3786,12 +3988,31 @@ def _v2_run_full(Pxs_df, sectors_s, st_dt, volumeTrd_df=None,
 # ENTRY POINT
 # ===============================================================================
 
-def run(Pxs_df, sectors_s, volumeTrd_df=None, force_rebuild_pit=False):
+def run(Pxs_df, sectors_df, volumeTrd_df=None, force_rebuild_pit=False):
+    """
+    sectors_df : pd.Series (sector only, backward compat)
+                 OR pd.DataFrame with columns ['sector', 'sub_sector']
+    """
     print("=" * 70)
     print("  FACTOR MODEL v2")
     print("  Sequence: Beta → Quality → Idio Mom → Size → Value → SI → "
-          "GK Vol → Macro → Sectors → O-U")
+          "GK Vol → Macro → Sectors → O-U → Sub-sectors")
     print("=" * 70)
+
+    # ── Backward compatibility: accept Series or DataFrame ───────────────────
+    if isinstance(sectors_df, pd.DataFrame):
+        sectors_s = sectors_df['sector'].copy()
+        subsec_s  = sectors_df['sub_sector'].copy() if 'sub_sector' in sectors_df.columns else None
+    else:
+        sectors_s = sectors_df.copy()
+        subsec_s  = None
+
+    if subsec_s is not None:
+        subsec_s = subsec_s[~subsec_s.index.duplicated(keep='first')]
+        print(f"  Sub-sector column detected: "
+              f"{subsec_s.nunique()} unique sub-sectors")
+    else:
+        print("  No sub-sector column — Step 12 will be skipped")
 
     if force_rebuild_pit:
         print("  force_rebuild_pit=True — wiping quality and value PIT weight caches...")
@@ -3806,6 +4027,10 @@ def run(Pxs_df, sectors_s, volumeTrd_df=None, force_rebuild_pit=False):
 
     Pxs_df    = Pxs_df.loc[:, ~Pxs_df.columns.duplicated(keep='first')]
     sectors_s = sectors_s[~sectors_s.index.duplicated(keep='first')]
+
+    # Pass subsec_s to pipeline functions via function attribute
+    _v2_run_full._subsec_s        = subsec_s
+    _v2_run_incremental._subsec_s = subsec_s
 
     update_input = input(
         "\n  Incremental update? (y/n) [default=y]: "
@@ -3863,8 +4088,8 @@ def run(Pxs_df, sectors_s, volumeTrd_df=None, force_rebuild_pit=False):
 
 
 # Full recalculation with fresh PIT weights (after residual source change etc.)
-# x = run(Pxs_df, sectors_s, force_rebuild_pit=True)
+# x = run(Pxs_df, sectors_df, force_rebuild_pit=True)
 
 # Normal daily incremental
-x = run(Pxs_df, sectors_s)  
+x = run(Pxs_df, sectors_df)  
 
