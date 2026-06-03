@@ -4436,8 +4436,7 @@ def run_backtest(
     print("  DAILY P&L — LAST 10 TRADING DAYS (all strategies)")
     print(f"  {'='*72}")
     # 10-day P&L — use full nav_series (includes cached history)
-    # Exclude today since intraday prices are provisional (forward-fill)
-    _full_dates = sorted(d for d in nav_series[S_ALPHA].index if d < today_ts)
+    _full_dates = sorted(nav_series[S_ALPHA].index)
     _last10     = _full_dates[-10:]
     print(f"\n  {'Date':<12}" + "".join(f"  {l:>9}" for l in _col_lbls))
     print("  " + "-"*12 + ("  " + "-"*9)*len(_col_lbls))
