@@ -2188,9 +2188,19 @@ def _state_from_json(js: str) -> dict:
     snap['last_rebal'] = pd.Timestamp(snap['last_rebal']) \
                          if snap.get('last_rebal') else None
     snap['weights'] = pd.Series(snap['weights'], dtype=float)
-    # fields not in JSON (nav_series, weights_by_date, logs): init empty
-    for f in ['nav_series','weights_by_date','rebal_log','dd_log','hedge_log']:
-        snap[f] = {}
+    # fields not in JSON: init with correct types
+    snap['nav_series']      = {}
+    snap['weights_by_date'] = {}
+    for f in ['dd_log', 'hedge_log']:
+        snap[f] = []
+    # Reconstruct minimal rebal_log so trade summary can compute _drifted_w
+    if snap.get('last_rebal') and not snap['weights'].empty:
+        snap['rebal_log'] = [{'dt':     snap['last_rebal'],
+                              'w':      snap['weights'].copy(),
+                              'regime': snap.get('regime', 'alpha'),
+                              'nav':    snap.get('nav', 1.0)}]
+    else:
+        snap['rebal_log'] = []
     return snap
 
 
@@ -3749,7 +3759,13 @@ def run_backtest(
 
     for day_idx, dt in enumerate(trading_days):
         is_calc_date = dt in calc_date_set
-        prev_dt = trading_days[day_idx - 1] if day_idx > 0 else None
+        # In incremental mode on day_idx=0, prev_dt must come from full
+        # Pxs_df history — not trading_days (which only has new dates)
+        if day_idx > 0:
+            prev_dt = trading_days[day_idx - 1]
+        else:
+            _all_px_before = Pxs_df.index[Pxs_df.index < dt]
+            prev_dt = _all_px_before[-1] if len(_all_px_before) > 0 else None
 
         # -- Update days_held for dynamic strategies --------------------------
         for s_idx in DYNAMIC:
@@ -4128,7 +4144,10 @@ def run_backtest(
             for s_idx in range(N_STRAT):
                 nav_records[s_idx][dt]   = state[s_idx]['nav']
                 gross_records[s_idx][dt] = state[s_idx].get('gross', 1.0)
-                _new_nav[s_idx][dt]      = state[s_idx]['nav']
+
+        # ── Record new NAV for cache (every day, every strategy) ──────────────
+        for s_idx in range(N_STRAT):
+            _new_nav[s_idx][dt] = state[s_idx]['nav']
 
         # -- Update regime for all strategies (uses updated dd) ---------------
         for s_idx in range(N_STRAT):
@@ -4371,11 +4390,13 @@ def run_backtest(
         _curr_ldt[lbl] = ldt
         _all_tks |= set(wd.index)
 
-    # Last-day returns
-    prev_td = trading_days[-2] if len(trading_days) >= 2 else today_ts
+    # Last-day returns — use full Pxs_df index for previous day
+    _px_dates_before = Pxs_df.index[Pxs_df.index < today_ts]
+    prev_td  = _px_dates_before[-1] if len(_px_dates_before) > 0 else today_ts
     _day_ret = {}
     for tkr in _all_tks:
-        if tkr in Pxs_df.columns:
+        if tkr in Pxs_df.columns and prev_td in Pxs_df.index \
+                and today_ts in Pxs_df.index:
             p1 = Pxs_df.loc[prev_td, tkr]; p2 = Pxs_df.loc[today_ts, tkr]
             _day_ret[tkr] = (p2/p1 - 1)*100 if p1 > 0 else 0.0
         else:
@@ -4414,7 +4435,10 @@ def run_backtest(
     print(f"\n  {'='*72}")
     print("  DAILY P&L — LAST 10 TRADING DAYS (all strategies)")
     print(f"  {'='*72}")
-    _last10 = list(trading_days[-10:])
+    # 10-day P&L — use full nav_series (includes cached history)
+    # Exclude today since intraday prices are provisional (forward-fill)
+    _full_dates = sorted(d for d in nav_series[S_ALPHA].index if d < today_ts)
+    _last10     = _full_dates[-10:]
     print(f"\n  {'Date':<12}" + "".join(f"  {l:>9}" for l in _col_lbls))
     print("  " + "-"*12 + ("  " + "-"*9)*len(_col_lbls))
     _cum = {l: 1.0 for l in _col_lbls}
@@ -4457,9 +4481,19 @@ def run_backtest(
         ('MVO+Hedge', S_MVO_HEDGE),
     ]
 
-    # Find last calc_date with cached portfolios
-    _last_cd = sorted([d for d in cached_dates if d <= today_ts])
-    _last_cd = _last_cd[-1] if _last_cd else None
+    # Find last date with cached portfolios in DAILY_PORT_TBL
+    try:
+        with ENGINE.connect() as _conn:
+            _lcd_row = _conn.execute(text(f"""
+                SELECT MAX(date) FROM {DAILY_PORT_TBL}
+                WHERE model_version=:mv AND params_hash=:ph
+                  AND date <= :td
+            """), {'mv': model_version, 'ph': ph,
+                   'td': today_ts.strftime('%Y-%m-%d')}).fetchone()
+        _last_cd = pd.Timestamp(_lcd_row[0]) if _lcd_row and _lcd_row[0] else None
+    except Exception:
+        _last_cd = sorted([d for d in cached_dates if d <= today_ts])
+        _last_cd = _last_cd[-1] if _last_cd else None
     _fresh_w = {}
 
     if _last_cd:
@@ -4511,6 +4545,9 @@ def run_backtest(
                     'mvo':    _cache_td.get('mvo',    pd.Series(dtype=float)),
                     'hybrid': _cache_td.get('hybrid', pd.Series(dtype=float)),
                 }))
+            elif s_idx == S_MVO_HEDGE:
+                _fresh_w[lbl] = _fresh(s_idx, _cache_td.get('mvo',
+                                        pd.Series(dtype=float)))
             elif s_idx == S_EXCL:
                 _fresh_w[lbl] = _fresh(s_idx, _regime_weights(today_ts, reg, {
                     'alpha':  _cache_td.get('alpha_excl',
