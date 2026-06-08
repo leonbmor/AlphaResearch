@@ -336,7 +336,7 @@ def get_universe(Pxs_df, sectors_s, extended_st_dt):
 
 
 def generate_calc_dates(Pxs_df, step_days=30):
-    """Generate rebalancing dates from MB_START_DATE at step_days intervals."""
+    """Generate rebalancing dates from MB_START_DATE at step_days calendar day intervals."""
     end_date = Pxs_df.index.max()
     dates    = []
     current  = MB_START_DATE
@@ -3091,6 +3091,41 @@ def run_backtest(
             all_last = [max(d.keys()) for d in _cached_nav.values() if d]
             _cache_last_dt = min(all_last) if all_last else None
 
+        # ── Roll back state to _cache_last_dt ────────────────────────────────
+        # The state JSON was saved at end of last run (which may have included
+        # _last_pxs_dt). Reset nav to the cached value at _cache_last_dt and
+        # weights to the last rebalancing at or before _cache_last_dt so the
+        # NAV computation for the rerun date starts from the correct base.
+        if _cache_last_dt is not None:
+            for s_idx in range(N_STRAT):
+                lbl = STRATEGY_LABELS[s_idx]
+                # Reset nav
+                if (s_idx in _cached_nav
+                        and _cache_last_dt in _cached_nav[s_idx]):
+                    _cached_states[s_idx]['nav'] = \
+                        _cached_nav[s_idx][_cache_last_dt]
+                # Reset weights to last rebalancing at or before _cache_last_dt
+                try:
+                    with ENGINE.connect() as _c:
+                        _wrows = _c.execute(text(f"""
+                            SELECT ticker, weight, date FROM {MVO_REBAL_CACHE_TBL}
+                            WHERE params_hash = :ph AND strategy = :st
+                              AND date = (
+                                  SELECT MAX(date) FROM {MVO_REBAL_CACHE_TBL}
+                                  WHERE params_hash = :ph AND strategy = :st
+                                    AND date <= :dt
+                              )
+                        """), {'ph': ph, 'st': lbl,
+                               'dt': _cache_last_dt.date()}).fetchall()
+                    if _wrows:
+                        _cached_states[s_idx]['weights'] = \
+                            pd.Series({r[0]: float(r[1]) for r in _wrows})
+                        # Roll back last_rebal to match the weights date
+                        _cached_states[s_idx]['last_rebal'] = \
+                            pd.Timestamp(_wrows[0][2])
+                except Exception:
+                    pass
+
     if _incremental:
         _new_start = Pxs_df.index[Pxs_df.index > _cache_last_dt][0] \
                      if any(Pxs_df.index > _cache_last_dt) else None
@@ -4190,8 +4225,21 @@ def run_backtest(
         print(f"\n  Incremental run complete — new dates: {len(trading_days)}")
         print(f"  New rebalancing events: {len(_new_rebal)}")
         for s_idx, dt_r, w_r, gf in _new_rebal:
+            st   = state[s_idx]
+            reg  = st.get('regime', 'alpha')
+            mode_str = f"  mode={reg}" if s_idx in DYNAMIC else ""
+            dd_str   = (f"  gross={gf:.0%}" if gf < 1.0 else "")
             print(f"    [{STRATEGY_LABELS[s_idx]}] {dt_r.date()}  "
-                  f"n={len(w_r)}  gross={gf:.0%}")
+                  f"n={len(w_r)}{mode_str}{dd_str}")
+        # Show current regime for all dynamic strategies
+        print(f"\n  Current regime (dynamic strategies):")
+        for s_idx in sorted(DYNAMIC):
+            st   = state[s_idx]
+            reg  = st.get('regime', 'alpha')
+            gross = st.get('gross', 1.0)
+            dd   = st.get('dd', 0.0)
+            print(f"    {STRATEGY_LABELS[s_idx]:<14} mode={reg:<8}  "
+                  f"gross={gross:.0%}  dd={dd*100:+.1f}%")
     def _build_results(ns, st, labels, params_h):
         """Build the standard results dict from nav_series and state."""
         return {
@@ -4491,91 +4539,70 @@ def run_backtest(
                    'td': today_ts.strftime('%Y-%m-%d')}).fetchone()
         _last_cd = pd.Timestamp(_lcd_row[0]) if _lcd_row and _lcd_row[0] else None
     except Exception:
+        _last_cd = None
+
+    # Find last date with cached portfolios (kept for X-snapshot reference)
+    try:
+        with ENGINE.connect() as _conn:
+            _lcd_row = _conn.execute(text(f"""
+                SELECT MAX(date) FROM {DAILY_PORT_TBL}
+                WHERE model_version=:mv AND params_hash=:ph
+                  AND date <= :td
+            """), {'mv': model_version, 'ph': ph,
+                   'td': today_ts.strftime('%Y-%m-%d')}).fetchone()
+        _last_cd = pd.Timestamp(_lcd_row[0]) if _lcd_row and _lcd_row[0] else None
+    except Exception:
         _last_cd = sorted([d for d in cached_dates if d <= today_ts])
         _last_cd = _last_cd[-1] if _last_cd else None
+
+    # _fresh_w = current live portfolio (same basis as live portfolio section)
     _fresh_w = {}
+    for lbl, s_idx in _all_strats_summary:
+        _fresh_w[lbl], _ = _curr_weights(s_idx)
+    # _fresh_w = current live portfolio (same basis as live portfolio section)
+    _fresh_w = {}
+    for lbl, s_idx in _all_strats_summary:
+        _fresh_w[lbl], _ = _curr_weights(s_idx)
 
-    if _last_cd:
-        # Load cached portfolios for last calc_date
-        try:
-            with ENGINE.connect() as conn:
-                rows = conn.execute(text(f"""
-                    SELECT strategy, weights_json FROM {DAILY_PORT_TBL}
-                    WHERE date=:dt AND model_version=:mv AND params_hash=:ph
-                """), {'dt': _last_cd.strftime('%Y-%m-%d'),
-                       'mv': model_version, 'ph': ph}).fetchall()
-            _cache_td = {r[0]: pd.Series(json.loads(r[1])) for r in rows}
-        except Exception:
-            _cache_td = {}
-
-        _cands_td = _cache_td.get('candidates', pd.Series(dtype=float))
-        def _fresh(s_idx, w_base):
-            """Apply today's ADVP filter using this strategy's current AUM."""
-            if w_base.empty: return w_base
-            w, _ = _apply_advp(w_base, _cands_td, today_ts, s_idx,
-                               target_n=len(w_base))
-            return w
-
+    # _drifted_w: previous portfolio drifted to yesterday's close
+    # Load from mvo_rebal_cache (reliable source regardless of rebal_log state)
+    _drifted_w = {}
+    try:
+        with ENGINE.connect() as _conn:
+            for lbl, s_idx in _all_strats_summary:
+                _db_lbl = STRATEGY_LABELS[s_idx]   # full label as stored in DB
+                _prev_rows = _conn.execute(text(f"""
+                    SELECT r.date, r.ticker, r.weight
+                    FROM {MVO_REBAL_CACHE_TBL} r
+                    WHERE r.params_hash = :ph AND r.strategy  = :st
+                      AND r.date = (
+                          SELECT MAX(date) FROM {MVO_REBAL_CACHE_TBL}
+                          WHERE params_hash = :ph AND strategy = :st
+                            AND date < :today
+                      )
+                """), {'ph': ph, 'st': _db_lbl,
+                       'today': today_ts.date()}).fetchall()
+                if _prev_rows:
+                    _prev_dt = pd.Timestamp(_prev_rows[0][0])
+                    _prev_w  = pd.Series({r[1]: float(r[2])
+                                          for r in _prev_rows})
+                    _drifted_w[lbl] = _drift(_prev_w, _prev_dt, prev_td)
+                else:
+                    _drifted_w[lbl] = pd.Series(dtype=float)
+    except Exception as _e:
+        # Fallback to rebal_log if DB unavailable
         for lbl, s_idx in _all_strats_summary:
             st  = state[s_idx]
-            reg = _get_regime(st['dd'])
-            if s_idx == S_BASE:
-                _qual_dates   = [d for d in quality_wide.index if d <= today_ts]
-                _qual_dt      = _qual_dates[-1] if _qual_dates else None
-                _fresh_w[lbl] = _build_baseline(_qual_dt) if _qual_dt else pd.Series(dtype=float)
-            elif s_idx == S_ALPHA:
-                _fresh_w[lbl] = _fresh(s_idx, _cache_td.get('alpha',
-                                        pd.Series(dtype=float)))
-            elif s_idx == S_MVO:
-                _fresh_w[lbl] = _fresh(s_idx, _cache_td.get('mvo',
-                                        pd.Series(dtype=float)))
-            elif s_idx == S_HYB:
-                _fresh_w[lbl] = _fresh(s_idx, _cache_td.get('hybrid',
-                                        pd.Series(dtype=float)))
-            elif s_idx == S_SMART:
-                _fresh_w[lbl] = _fresh(s_idx, _regime_weights(today_ts, reg, {
-                    'alpha':  _cache_td.get('alpha',  pd.Series(dtype=float)),
-                    'mvo':    _cache_td.get('mvo',    pd.Series(dtype=float)),
-                    'hybrid': _cache_td.get('hybrid', pd.Series(dtype=float)),
-                }))
-            elif s_idx in (S_DYN, S_HEDGE, S_DD):
-                _fresh_w[lbl] = _fresh(s_idx, _regime_weights(today_ts, reg, {
-                    'alpha':  _cache_td.get('alpha',  pd.Series(dtype=float)),
-                    'mvo':    _cache_td.get('mvo',    pd.Series(dtype=float)),
-                    'hybrid': _cache_td.get('hybrid', pd.Series(dtype=float)),
-                }))
-            elif s_idx == S_MVO_HEDGE:
-                _fresh_w[lbl] = _fresh(s_idx, _cache_td.get('mvo',
-                                        pd.Series(dtype=float)))
-            elif s_idx == S_EXCL:
-                _fresh_w[lbl] = _fresh(s_idx, _regime_weights(today_ts, reg, {
-                    'alpha':  _cache_td.get('alpha_excl',
-                              _cache_td.get('alpha',  pd.Series(dtype=float))),
-                    'mvo':    _cache_td.get('mvo_excl',
-                              _cache_td.get('mvo',    pd.Series(dtype=float))),
-                    'hybrid': _cache_td.get('hybrid_excl',
-                              _cache_td.get('hybrid', pd.Series(dtype=float))),
-                }))
-
-    # Drifted current weights (B side of delta):
-    # - if today IS a rebalancing date for this strategy: use log[-2] drifted to today
-    # - if today is NOT a rebalancing date: use log[-1] drifted to today
-    _drifted_w = {}
-    for lbl, s_idx in _all_strats_summary:
-        st  = state[s_idx]
-        log = st['rebal_log']
-        if not log:
-            _drifted_w[lbl] = pd.Series(dtype=float)
-            continue
-        today_was_rebal = log[-1]['dt'] == today_ts
-        if today_was_rebal:
-            ref = log[-2] if len(log) >= 2 else None
-        else:
-            ref = log[-1]
-        if ref is None:
-            _drifted_w[lbl] = pd.Series(dtype=float)
-        else:
-            _drifted_w[lbl] = _drift(ref['w'], ref['dt'], today_ts)
+            log = st['rebal_log']
+            if not log:
+                _drifted_w[lbl] = pd.Series(dtype=float)
+                continue
+            today_was_rebal = log[-1]['dt'] == today_ts
+            ref = (log[-2] if today_was_rebal and len(log) >= 2
+                   else log[-1] if not today_was_rebal else None)
+            drift_to = prev_td if today_was_rebal else today_ts
+            _drifted_w[lbl] = (_drift(ref['w'], ref['dt'], drift_to)
+                                if ref else pd.Series(dtype=float))
 
     # Compute deltas
     all_trade_tks = set()
