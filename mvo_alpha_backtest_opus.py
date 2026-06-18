@@ -4088,8 +4088,11 @@ def run_backtest(
                     # ADVP on tier1, then append overlay (today's prices/AUM).
                     # Uses the hoisted helper (explicit dt/cands) so it works on
                     # non-calc-dates where the static-branch closure is undefined.
+                    #   cands_        = full candidate pool for ADVP replacement
+                    #   non_core_cands= overlay-eligible names (tradable subset)
                     w_hyp, _advp_affected, _ov_dyn = _advp_then_tier2_loop(
                         w_hyp, s_idx, dt,
+                        cands_dyn,
                         [t for t in cands_dyn.index if t in pxs_cols],
                         comp_s)
 
