@@ -2002,8 +2002,34 @@ def get_last_rebal_diagnostics(results, Pxs_df,
     print(f"  MVO pool        : {len(mvo_pool)} stocks  "
           f"(top {n_mvo} by Composite from active_u)")
     print(f"\n  PIT IC weights ({comp_dt.date()}):")
-    for f, w in ic_weights.items():
+    # Replicate the composite builder's QUALITY_FLOOR redistribution EXACTLY (it
+    # redistributes within {Idio_Mom, Mom_12M1, Quality}, Value untouched), so the
+    # printed weights match what actually drove the composite — not the raw
+    # pre-floor weights_by_date.
+    _disp = ic_weights.copy()
+    _floor_applied = False
+    if QUALITY_FLOOR > 0 and not _disp.empty:
+        _mom_f = [f for f in ('Idio_Mom', 'Mom_12M1') if f in _disp.index]
+        if 'Quality' in _disp.index and _mom_f:
+            _wmom = sum(_disp[f] for f in _mom_f)
+            _wq   = _disp['Quality']
+            _wmq  = _wmom + _wq
+            _share = (_wq / _wmq) if _wmq > 0 else 0.0
+            if _share < QUALITY_FLOOR:
+                _disp = _disp.copy()
+                _disp['Quality'] = _wmq * QUALITY_FLOOR
+                _rem = _wmq * (1.0 - QUALITY_FLOOR)
+                if _wmom > 0:
+                    for f in _mom_f:
+                        _disp[f] = _rem * (ic_weights[f] / _wmom)
+                _floor_applied = True
+    for f, w in _disp.items():
         print(f"    {f:<15} {w:.4f}")
+    if _floor_applied:
+        print(f"    (post-QUALITY_FLOOR={QUALITY_FLOOR}: Quality lifted from "
+              f"{ic_weights['Quality']:.4f}; momentum rescaled, Value untouched)")
+    elif QUALITY_FLOOR > 0:
+        print(f"    (QUALITY_FLOOR={QUALITY_FLOOR} did not bind this date)")
 
     return scores_df, ic_weights, prefilt_stocks, alpha_pool, mvo_pool
 
